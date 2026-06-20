@@ -654,13 +654,95 @@ function saveState(state) {
   try { localStorage.setItem(STORAGE, JSON.stringify(state)); } catch {}
 }
 
+/* ─── BACKUP MODAL ─── */
+function BackupModal({ groups, types, items, onImport, onClose }) {
+  const [importError, setImportError] = useState(null);
+  const [importOk, setImportOk] = useState(false);
+
+  const doExport = () => {
+    const data = { version: 1, exportedAt: new Date().toISOString(), groups, types, items };
+    const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    const date = new Date().toISOString().split("T")[0];
+    a.href = url;
+    a.download = `dodung-backup-${date}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const doImport = (e) => {
+    setImportError(null);
+    setImportOk(false);
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try {
+        const data = JSON.parse(ev.target.result);
+        if (!data.items || !Array.isArray(data.items)) throw new Error("File không hợp lệ");
+        if (!confirm(`Tìm thấy ${data.items.length} sản phẩm, ${data.groups?.length || 0} nhóm.\n\nDữ liệu hiện tại sẽ bị GHI ĐÈ. Tiếp tục?`)) return;
+        onImport(data);
+        setImportOk(true);
+      } catch (err) {
+        setImportError("File không hợp lệ hoặc bị lỗi: " + err.message);
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = "";
+  };
+
+  return (
+    <div>
+      {/* Export */}
+      <div style={{ background: C.surface, borderRadius: 10, padding: "14px 16px", marginBottom: 14 }}>
+        <div style={{ fontWeight: 600, fontSize: 15, marginBottom: 4 }}>📤 Xuất dữ liệu</div>
+        <div style={{ fontSize: 13, color: C.muted, marginBottom: 12, lineHeight: 1.6 }}>
+          Tải toàn bộ đồ dùng, nhóm, loại ra file <strong>.json</strong>. Lưu file này vào máy tính, Google Drive, hoặc iCloud để backup.
+        </div>
+        <div style={{ fontSize: 12, color: C.muted, marginBottom: 12 }}>
+          Hiện có: <strong>{items.length} sản phẩm</strong> · {groups.length} nhóm · {types.length} loại
+        </div>
+        <button style={s.btnPrimary} onClick={doExport}>📥 Tải file backup (.json)</button>
+      </div>
+
+      {/* Import */}
+      <div style={{ background: C.surface, borderRadius: 10, padding: "14px 16px" }}>
+        <div style={{ fontWeight: 600, fontSize: 15, marginBottom: 4 }}>📂 Khôi phục dữ liệu</div>
+        <div style={{ fontSize: 13, color: C.muted, marginBottom: 12, lineHeight: 1.6 }}>
+          Chọn file <strong>.json</strong> đã backup trước đó để khôi phục. <span style={{ color: C.red, fontWeight: 500 }}>Dữ liệu hiện tại sẽ bị ghi đè.</span>
+        </div>
+        <label style={{ display: "inline-flex", alignItems: "center", gap: 8, ...s.btn, cursor: "pointer" }}>
+          📁 Chọn file backup
+          <input type="file" accept=".json" onChange={doImport} style={{ display: "none" }} />
+        </label>
+        {importError && (
+          <div style={{ marginTop: 10, background: "#FCEBEB", color: C.red, borderRadius: 8, padding: "8px 12px", fontSize: 13 }}>
+            ❌ {importError}
+          </div>
+        )}
+        {importOk && (
+          <div style={{ marginTop: 10, background: C.greenBg, color: C.green, borderRadius: 8, padding: "8px 12px", fontSize: 13 }}>
+            ✅ Khôi phục thành công!
+          </div>
+        )}
+      </div>
+
+      <div style={s.sep} />
+      <div style={{ fontSize: 12, color: C.faint, lineHeight: 1.7 }}>
+        💡 Gợi ý: Backup mỗi tuần 1 lần, lưu file vào Google Drive hoặc iCloud để không bị mất khi đổi điện thoại.
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   const initial = loadState();
   const [groups, setGroups] = useState(initial?.groups || DEFAULT_GROUPS);
   const [types, setTypes] = useState(initial?.types || DEFAULT_TYPES);
   const [items, setItems] = useState(initial?.items || []);
   const [page, setPage] = useState("dashboard");
-  const [modal, setModal] = useState(null); // "add" | "edit" | "groups"
+  const [modal, setModal] = useState(null); // "add" | "edit" | "groups" | "backup"
   const [editItem, setEditItem] = useState(null);
 
   useEffect(() => saveState({ groups, types, items }), [groups, types, items]);
@@ -670,6 +752,11 @@ export default function App() {
   const markDone = id => setItems(p => p.map(i => i.id === id ? { ...i, endDate: todayStr() } : i));
   const addSample = () => { setItems(p => [...p, ...SAMPLE_ITEMS.filter(s => !p.find(i => i.id === s.id))]); };
   const saveGroups = (gs, ts) => { setGroups(gs); setTypes(ts); setModal(null); };
+  const doImport = (data) => {
+    if (data.groups) setGroups(data.groups);
+    if (data.types) setTypes(data.types);
+    setItems(data.items);
+  };
 
   const PAGES = [
     { id: "dashboard", icon: "📊", label: "Tổng quan" },
@@ -687,7 +774,8 @@ export default function App() {
           <div style={{ fontSize: 17, fontWeight: 700, letterSpacing: "-0.3px" }}>ĐồDùng.io</div>
           <div style={{ fontSize: 11, color: C.faint }}>{PAGE_TITLES[page]}</div>
         </div>
-        <div style={{ display: "flex", gap: 8 }}>
+        <div style={{ display: "flex", gap: 6 }}>
+          <button onClick={() => setModal("backup")} style={s.btnSm} title="Backup">💾</button>
           <button onClick={() => setModal("groups")} style={s.btnSm}>⚙️ Nhóm</button>
           <button onClick={() => { setEditItem(null); setModal("add"); }} style={s.btnPrimary}>+ Thêm</button>
         </div>
@@ -702,6 +790,7 @@ export default function App() {
           <div style={{ display: "flex", gap: 10, flexDirection: "column", width: "100%", maxWidth: 280 }}>
             <button style={s.btnPrimary} onClick={() => setModal("add")}>+ Thêm đồ dùng đầu tiên</button>
             <button style={s.btn} onClick={addSample}>✨ Dùng dữ liệu mẫu</button>
+            <button style={s.btn} onClick={() => setModal("backup")}>💾 Khôi phục từ backup</button>
           </div>
         </div>
       ) : page === "dashboard" ? <DashboardPage items={items} groups={groups} types={types} />
@@ -726,6 +815,9 @@ export default function App() {
       </Modal>
       <Modal open={modal === "groups"} onClose={() => setModal(null)} title="Quản lý nhóm & loại">
         <GroupManager groups={groups} types={types} onSave={saveGroups} onClose={() => setModal(null)} />
+      </Modal>
+      <Modal open={modal === "backup"} onClose={() => setModal(null)} title="💾 Backup & Khôi phục">
+        <BackupModal groups={groups} types={types} items={items} onImport={doImport} onClose={() => setModal(null)} />
       </Modal>
     </div>
   );
