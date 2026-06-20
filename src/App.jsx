@@ -38,13 +38,20 @@ const fmtDate = (d) => { if (!d) return "—"; const [y, m, dd] = d.split("-"); 
 const uid = () => Date.now() + "_" + Math.random().toString(36).slice(2, 7);
 
 function calcItem(it) {
-  const start = it.startDate || it.buyDate;
+  const price = parseFloat(it.price) || 0;
+  const notStarted = !it.startDate;
+
+  if (notStarted) {
+    const costPerMl = it.volume > 0 ? price / it.volume : null;
+    const daysToExp = it.expireDate ? daysBetween(todayStr(), it.expireDate) : null;
+    return { perDay: null, perMonth: null, mlPerDay: null, costPerMl, estDays: null, isActive: false, notStarted: true, days: 0, daysToExp, valueScore: null };
+  }
+
+  const start = it.startDate;
   const end = it.endDate || todayStr();
   const days = daysBetween(start, end);
-  const price = parseFloat(it.price) || 0;
   const perDay = price / days;
   const perMonth = perDay * 30;
-  // ml/day only when finished
   let mlPerDay = null, costPerMl = null, estDays = null;
   if (it.volume > 0 && it.endDate) {
     mlPerDay = it.volume / days;
@@ -55,13 +62,10 @@ function calcItem(it) {
   }
   const isActive = !it.endDate;
   const daysToExp = it.expireDate ? daysBetween(todayStr(), it.expireDate) : null;
-  // value score: days per 1000đ (higher = better) - only for finished items with volume
-  const valueScore = it.endDate && it.volume > 0 && price > 0
-    ? parseFloat((days / (price / 1000)).toFixed(2))
-    : it.endDate && price > 0
+  const valueScore = it.endDate && price > 0
     ? parseFloat((days / (price / 1000)).toFixed(2))
     : null;
-  return { perDay, perMonth, mlPerDay, costPerMl, estDays, isActive, days, daysToExp, valueScore };
+  return { perDay, perMonth, mlPerDay, costPerMl, estDays, isActive, notStarted: false, days, daysToExp, valueScore };
 }
 
 /* ─── DESIGN TOKENS ─── */
@@ -111,6 +115,7 @@ function Badge({ color = C.greenBg, text_color = C.green, children }) {
   return <span style={{ background: color, color: text_color, padding: "2px 9px", borderRadius: 20, fontSize: 11, fontWeight: 600 }}>{children}</span>;
 }
 function StatusBadge({ c, it }) {
+  if (c.notStarted) return <Badge color="#EEF2FF" text_color="#6366F1">Chưa dùng</Badge>;
   if (!c.isActive) return <Badge color={C.surface} text_color={C.muted}>Đã hết</Badge>;
   if (c.daysToExp != null && c.daysToExp < 0) return <Badge color={C.redBg} text_color={C.red}>Hết hạn</Badge>;
   if (c.daysToExp != null && c.daysToExp < 30) return <Badge color={C.amberBg} text_color={C.amber}>Sắp hết hạn</Badge>;
@@ -131,7 +136,7 @@ function ItemForm({ initial, groups, types, onSave, onClose }) {
       id: initial?.id || uid(),
       price: parseFloat(f.price) || 0,
       volume: parseFloat(f.volume) || 0,
-      startDate: f.startDate || f.buyDate,
+      startDate: f.startDate || null,
       endDate: f.endDate || null,
       expireDate: f.expireDate || null,
       typeId: f.typeId || null,
@@ -350,9 +355,10 @@ function ScoreCard({ item, rank, score, groups, types, detail = false }) {
 /* ─── PAGES ─── */
 function DashboardPage({ items, groups, types }) {
   const active = items.filter(i => !i.endDate);
+  const inUse = active.filter(i => i.startDate); // Đang thực sự dùng (đã bắt đầu)
   const totalSpent = items.reduce((s, i) => s + (i.price || 0), 0);
-  const dayCost = active.reduce((s, i) => s + calcItem(i).perDay, 0);
-  const monthCost = active.reduce((s, i) => s + calcItem(i).perMonth, 0);
+  const dayCost = inUse.reduce((s, i) => s + (calcItem(i).perDay || 0), 0);
+  const monthCost = inUse.reduce((s, i) => s + (calcItem(i).perMonth || 0), 0);
   const alerts = items.filter(i => { const c = calcItem(i); return (c.daysToExp != null && c.daysToExp < 30); });
   const catSpend = {};
   items.forEach(i => { catSpend[i.groupId] = (catSpend[i.groupId] || 0) + (i.price || 0); });
@@ -367,7 +373,7 @@ function DashboardPage({ items, groups, types }) {
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 14 }}>
         {[
           ["Tổng đã chi", fmt(totalSpent) + "đ", items.length + " sản phẩm"],
-          ["Chi phí/ngày", fmt(dayCost) + "đ", active.length + " đang dùng"],
+          ["Chi phí/ngày", fmt(dayCost) + "đ", inUse.length + " đang dùng · " + (active.length - inUse.length) + " chưa dùng"],
           ["Chi phí/tháng", fmt(monthCost) + "đ", "Ước tính"],
           ["Cần chú ý", alerts.length + " món", "Sắp/đã hết hạn"],
         ].map(([l, v, sub]) => (
@@ -422,7 +428,7 @@ function DashboardPage({ items, groups, types }) {
   );
 }
 
-function ItemsPage({ items, groups, types, onEdit, onDelete, onMarkDone }) {
+function ItemsPage({ items, groups, types, onEdit, onDelete, onMarkDone, onStartNow }) {
   const [groupFilter, setGroupFilter] = useState(null);
   const [search, setSearch] = useState("");
   let filtered = groupFilter ? items.filter(i => i.groupId === groupFilter) : items;
@@ -460,22 +466,28 @@ function ItemsPage({ items, groups, types, onEdit, onDelete, onMarkDone }) {
               <StatusBadge c={c} it={it} />
             </div>
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8, margin: "10px 0" }}>
-              {[["Giá mua", fmt(it.price) + "đ"], ["Chi phí/ngày", fmt(c.perDay) + "đ"], ["Chi phí/tháng", fmt(c.perMonth) + "đ"]].map(([l, v]) => (
+              {[
+                ["Giá mua", fmt(it.price) + "đ"],
+                ["Chi phí/ngày", c.notStarted ? "Chưa dùng" : fmt(c.perDay) + "đ"],
+                ["Chi phí/tháng", c.notStarted ? "—" : fmt(c.perMonth) + "đ"],
+              ].map(([l, v]) => (
                 <div key={l} style={{ background: C.surface, borderRadius: 7, padding: "7px 9px" }}>
                   <div style={{ fontSize: 10, color: C.muted }}>{l}</div>
-                  <div style={{ fontSize: 13, fontWeight: 600, marginTop: 2 }}>{v}</div>
+                  <div style={{ fontSize: 13, fontWeight: 600, marginTop: 2, color: c.notStarted && l !== "Giá mua" ? C.faint : "inherit" }}>{v}</div>
                 </div>
               ))}
             </div>
             <div style={{ fontSize: 12, color: C.muted, marginBottom: 10 }}>
-              Mua: {fmtDate(it.buyDate)}{it.endDate ? ` · Hết: ${fmtDate(it.endDate)} (${c.days} ngày)` : ` · ${c.days} ngày đã dùng`}
+              Mua: {fmtDate(it.buyDate)}
+              {c.notStarted ? " · Chưa bắt đầu dùng" : it.endDate ? ` · Hết: ${fmtDate(it.endDate)} (${c.days} ngày)` : ` · ${c.days} ngày đã dùng`}
               {it.volume ? ` · ${fmt(it.volume)}ml` : ""}
               {c.mlPerDay ? ` · ${c.mlPerDay.toFixed(1)}ml/ngày` : ""}
               {it.expireDate ? ` · HSD: ${fmtDate(it.expireDate)}` : ""}
             </div>
-            <div style={{ display: "flex", gap: 6 }}>
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
               <button onClick={() => onEdit(it)} style={s.btnSm}>✏️ Sửa</button>
-              {!it.endDate && <button onClick={() => onMarkDone(it.id)} style={s.btnSm}>✓ Đánh dấu hết</button>}
+              {c.notStarted && <button onClick={() => onStartNow(it.id)} style={{ ...s.btnSm, color: C.green, borderColor: C.green }}>▶ Bắt đầu dùng</button>}
+              {!c.notStarted && !it.endDate && <button onClick={() => onMarkDone(it.id)} style={s.btnSm}>✓ Đánh dấu hết</button>}
               <button onClick={() => onDelete(it.id)} style={{ ...s.btnSm, color: C.red, marginLeft: "auto" }}>🗑</button>
             </div>
           </div>
@@ -984,6 +996,7 @@ export default function App() {
   const saveItem = it => { setItems(p => editItem ? p.map(x => x.id === it.id ? it : x) : [...p, it]); setModal(null); setEditItem(null); };
   const deleteItem = id => { if (confirm("Xoá sản phẩm này?")) setItems(p => p.filter(i => i.id !== id)); };
   const markDone = id => setItems(p => p.map(i => i.id === id ? { ...i, endDate: todayStr() } : i));
+  const startNow = id => setItems(p => p.map(i => i.id === id ? { ...i, startDate: todayStr() } : i));
   const addSample = () => { setItems(p => [...p, ...SAMPLE_ITEMS.filter(s => !p.find(i => i.id === s.id))]); };
   const saveGroups = (gs, ts) => { setGroups(gs); setTypes(ts); setModal(null); };
   const doImport = (data) => {
@@ -1044,7 +1057,7 @@ export default function App() {
           </div>
         </div>
       ) : page === "dashboard" ? <DashboardPage items={items} groups={groups} types={types} />
-        : page === "items" ? <ItemsPage items={items} groups={groups} types={types} onEdit={it => { setEditItem(it); setModal("edit"); }} onDelete={deleteItem} onMarkDone={markDone} />
+        : page === "items" ? <ItemsPage items={items} groups={groups} types={types} onEdit={it => { setEditItem(it); setModal("edit"); }} onDelete={deleteItem} onMarkDone={markDone} onStartNow={startNow} />
         : page === "wishlist" ? <WishlistPage wishes={wishes} items={items} groups={groups} types={types} onAdd={() => { setEditWish(null); setModal("addwish"); }} onEdit={w => { setEditWish(w); setModal("addwish"); }} onDelete={deleteWish} onMoved={moveToItems} />
         : page === "compare" ? <ComparePage items={items} groups={groups} types={types} />
         : page === "optimize" ? <OptimizePage items={items} groups={groups} types={types} />
