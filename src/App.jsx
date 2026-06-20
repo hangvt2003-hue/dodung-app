@@ -641,6 +641,238 @@ function OptimizePage({ items, groups, types }) {
   );
 }
 
+/* ─── WISHLIST ─── */
+// Tính chỉ số wishlist dựa trên lịch sử items
+function calcWish(wish, items, types) {
+  const price = parseFloat(wish.price) || 0;
+  const volume = parseFloat(wish.volume) || 0;
+
+  // Tìm lịch sử: ưu tiên cùng typeId, rồi cùng groupId
+  const history = items.filter(i => i.endDate && (
+    (wish.typeId && i.typeId === wish.typeId) ||
+    (!wish.typeId && i.groupId === wish.groupId)
+  ));
+
+  let mlPerDay = null, estDays = null, estDaysSource = "—", avgPerDay = null;
+
+  if (history.length > 0) {
+    // Trung bình ml/ngày từ lịch sử có volume
+    const withVol = history.filter(i => i.volume > 0);
+    if (withVol.length > 0) {
+      const rates = withVol.map(i => {
+        const days = daysBetween(i.startDate || i.buyDate, i.endDate);
+        return i.volume / days;
+      });
+      mlPerDay = rates.reduce((a, b) => a + b, 0) / rates.length;
+    }
+    // Trung bình chi phí/ngày từ lịch sử
+    const perDays = history.map(i => {
+      const days = daysBetween(i.startDate || i.buyDate, i.endDate);
+      return (parseFloat(i.price) || 0) / days;
+    });
+    avgPerDay = perDays.reduce((a, b) => a + b, 0) / perDays.length;
+
+    if (volume > 0 && mlPerDay) {
+      estDays = Math.round(volume / mlPerDay);
+      estDaysSource = "lịch sử (" + withVol.length + " món)";
+    } else if (price > 0 && avgPerDay > 0) {
+      estDays = Math.round(price / avgPerDay);
+      estDaysSource = "giá TB lịch sử";
+    }
+  }
+
+  // Fallback: dùng HSD nếu có
+  if (!estDays && wish.expireDate) {
+    estDays = daysBetween(todayStr(), wish.expireDate);
+    estDaysSource = "HSD (ước tính)";
+  }
+
+  const perDay = estDays ? price / estDays : null;
+  const perMonth = perDay ? perDay * 30 : null;
+  const costPerMl = volume > 0 && price > 0 ? price / volume : null;
+  const valueScore = estDays && price > 0 ? parseFloat((estDays / (price / 1000)).toFixed(2)) : null;
+
+  return { price, volume, mlPerDay, estDays, estDaysSource, perDay, perMonth, costPerMl, valueScore, historyCount: history.length };
+}
+
+function WishForm({ initial, groups, types, onSave, onClose }) {
+  const blank = { name: "", brand: "", groupId: groups[0]?.id || "", typeId: "", price: "", volume: "", expireDate: "", notes: "", url: "" };
+  const [f, setF] = useState(initial ? { ...initial, price: String(initial.price || ""), volume: String(initial.volume || "") } : blank);
+  const set = (k, v) => setF(p => ({ ...p, [k]: v }));
+  const filteredTypes = types.filter(t => t.groupId === f.groupId);
+  const save = () => {
+    if (!f.name.trim() || !f.price) { alert("Vui lòng điền tên và giá"); return; }
+    onSave({ ...f, id: initial?.id || uid(), price: parseFloat(f.price) || 0, volume: parseFloat(f.volume) || 0, expireDate: f.expireDate || null, typeId: f.typeId || null });
+  };
+  return (
+    <div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 10 }}>
+        <div><label style={s.label}>Tên sản phẩm *</label><input style={s.input} value={f.name} onChange={e => set("name", e.target.value)} placeholder="VD: Cetaphil 500ml" /></div>
+        <div><label style={s.label}>Nhãn hiệu</label><input style={s.input} value={f.brand} onChange={e => set("brand", e.target.value)} placeholder="VD: Cetaphil" /></div>
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 10 }}>
+        <div>
+          <label style={s.label}>Nhóm *</label>
+          <select style={s.input} value={f.groupId} onChange={e => { set("groupId", e.target.value); set("typeId", ""); }}>
+            {groups.map(g => <option key={g.id} value={g.id}>{g.icon} {g.name}</option>)}
+          </select>
+        </div>
+        <div>
+          <label style={s.label}>Loại sản phẩm</label>
+          <select style={s.input} value={f.typeId} onChange={e => set("typeId", e.target.value)}>
+            <option value="">— Không phân loại —</option>
+            {filteredTypes.map(t => <option key={t.id} value={t.id}>{t.name}</option>)}
+          </select>
+        </div>
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 10 }}>
+        <div><label style={s.label}>Giá dự kiến (đ) *</label><input style={s.input} type="number" value={f.price} onChange={e => set("price", e.target.value)} placeholder="0" /></div>
+        <div><label style={s.label}>Dung tích/Khối lượng (ml/g)</label><input style={s.input} type="number" value={f.volume} onChange={e => set("volume", e.target.value)} placeholder="Không bắt buộc" /></div>
+      </div>
+      <div style={{ marginBottom: 10 }}><label style={s.label}>HSD (nếu biết — dùng để ước tính khi chưa có lịch sử)</label><input style={s.input} type="date" value={f.expireDate || ""} onChange={e => set("expireDate", e.target.value)} /></div>
+      <div style={{ marginBottom: 10 }}><label style={s.label}>Link sản phẩm (tùy chọn)</label><input style={s.input} value={f.url || ""} onChange={e => set("url", e.target.value)} placeholder="https://..." /></div>
+      <div style={{ marginBottom: 14 }}><label style={s.label}>Ghi chú</label><textarea style={{ ...s.input, resize: "vertical" }} rows={2} value={f.notes} onChange={e => set("notes", e.target.value)} placeholder="Lý do muốn mua, nơi bán..." /></div>
+      <div style={{ display: "flex", gap: 8 }}>
+        <button style={s.btnPrimary} onClick={save}>{initial ? "Lưu thay đổi" : "Thêm vào wishlist"}</button>
+        <button style={s.btn} onClick={onClose}>Huỷ</button>
+      </div>
+    </div>
+  );
+}
+
+function WishlistPage({ wishes, items, groups, types, onAdd, onEdit, onDelete, onMoved }) {
+  const [groupFilter, setGroupFilter] = useState(null);
+  const [expandId, setExpandId] = useState(null);
+
+  const filtered = groupFilter ? wishes.filter(w => w.groupId === groupFilter) : wishes;
+  const usedGroups = groups.filter(g => wishes.some(w => w.groupId === g.id));
+
+  return (
+    <div style={{ padding: "14px 14px 80px" }}>
+      {/* Group filter */}
+      <div style={{ overflowX: "auto", display: "flex", gap: 6, paddingBottom: 6, marginBottom: 10 }}>
+        {[{ id: null, name: "Tất cả", icon: "🛒" }, ...usedGroups].map(g => (
+          <button key={g.id || "all"} onClick={() => setGroupFilter(g.id)}
+            style={{ ...groupFilter === g.id ? s.btnSmActive : s.btnSm, whiteSpace: "nowrap", flexShrink: 0 }}>
+            {g.icon} {g.name} {g.id ? `(${wishes.filter(w => w.groupId === g.id).length})` : `(${wishes.length})`}
+          </button>
+        ))}
+      </div>
+
+      {filtered.length === 0 ? (
+        <div style={{ textAlign: "center", padding: 40, color: C.muted }}>
+          <div style={{ fontSize: 40, marginBottom: 12 }}>🛒</div>
+          <div style={{ marginBottom: 16 }}>Wishlist trống</div>
+          <button style={s.btnPrimary} onClick={onAdd}>+ Thêm món muốn mua</button>
+        </div>
+      ) : filtered.map(w => {
+        const g = groups.find(x => x.id === w.groupId);
+        const t = types.find(x => x.id === w.typeId);
+        const c = calcWish(w, items, types);
+        const expanded = expandId === w.id;
+
+        // So sánh với lịch sử cùng loại/nhóm
+        const history = items.filter(i => i.endDate && (
+          (w.typeId && i.typeId === w.typeId) || (!w.typeId && i.groupId === w.groupId)
+        ));
+        const bestHistory = history.length > 0 ? history.reduce((b, i) => calcItem(i).perDay < calcItem(b).perDay ? i : b, history[0]) : null;
+        const bestPerDay = bestHistory ? calcItem(bestHistory).perDay : null;
+        const isBetter = c.perDay && bestPerDay && c.perDay < bestPerDay;
+        const isWorse = c.perDay && bestPerDay && c.perDay > bestPerDay * 1.1;
+
+        return (
+          <div key={w.id} style={{ ...s.card, borderLeft: isBetter ? `3px solid ${C.green}` : isWorse ? `3px solid ${C.amber}` : `3px solid ${C.border}` }}>
+            {/* Header */}
+            <div style={{ display: "flex", alignItems: "flex-start", gap: 10, marginBottom: 8 }}>
+              <span style={{ fontSize: 22, marginTop: 2 }}>{g?.icon || "📦"}</span>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontWeight: 600, fontSize: 15 }}>{w.name}</div>
+                <div style={{ fontSize: 12, color: C.muted }}>{w.brand || ""}{t ? ` · ${t.name}` : ""}</div>
+              </div>
+              <div style={{ textAlign: "right", flexShrink: 0 }}>
+                <div style={{ fontWeight: 700, fontSize: 15 }}>{fmt(w.price)}đ</div>
+                {w.volume ? <div style={{ fontSize: 11, color: C.muted }}>{fmt(w.volume)}ml</div> : null}
+              </div>
+            </div>
+
+            {/* So sánh nhanh vs lịch sử */}
+            {bestHistory && c.perDay && (
+              <div style={{ background: isBetter ? C.greenBg : isWorse ? C.amberBg : C.surface, borderRadius: 7, padding: "6px 10px", fontSize: 12, marginBottom: 8 }}>
+                {isBetter
+                  ? <span style={{ color: C.green }}>✓ Rẻ hơn {bestHistory.name}: tiết kiệm {fmt(bestPerDay - c.perDay)}đ/ngày</span>
+                  : isWorse
+                  ? <span style={{ color: C.amber }}>⚠ Đắt hơn {bestHistory.name}: thêm {fmt(c.perDay - bestPerDay)}đ/ngày</span>
+                  : <span style={{ color: C.muted }}>≈ Tương đương {bestHistory.name}</span>}
+              </div>
+            )}
+
+            {/* Chỉ số chính */}
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 6, marginBottom: 8 }}>
+              <div style={{ background: C.surface, borderRadius: 7, padding: "7px 9px" }}>
+                <div style={{ fontSize: 10, color: C.muted }}>Chi phí/ngày</div>
+                <div style={{ fontSize: 13, fontWeight: 600, color: C.accent }}>{c.perDay ? fmt(c.perDay) + "đ" : "—"}</div>
+              </div>
+              <div style={{ background: C.surface, borderRadius: 7, padding: "7px 9px" }}>
+                <div style={{ fontSize: 10, color: C.muted }}>Chi phí/tháng</div>
+                <div style={{ fontSize: 13, fontWeight: 600 }}>{c.perMonth ? fmt(c.perMonth) + "đ" : "—"}</div>
+              </div>
+              <div style={{ background: C.surface, borderRadius: 7, padding: "7px 9px" }}>
+                <div style={{ fontSize: 10, color: C.muted }}>Ước dùng</div>
+                <div style={{ fontSize: 13, fontWeight: 600 }}>{c.estDays ? c.estDays + " ngày" : "—"}</div>
+              </div>
+            </div>
+
+            {/* Nguồn ước tính */}
+            <div style={{ fontSize: 11, color: C.faint, marginBottom: 8 }}>
+              📊 Ước tính từ: <strong style={{ color: C.muted }}>{c.estDaysSource}</strong>
+              {c.historyCount > 0 ? ` · ${c.historyCount} món lịch sử` : ""}
+              {c.costPerMl ? ` · ${c.costPerMl.toFixed(1)}đ/ml` : ""}
+              {c.valueScore ? ` · Điểm: ${c.valueScore}` : ""}
+            </div>
+
+            {/* Expand: so sánh chi tiết */}
+            {expanded && history.length > 0 && (
+              <div style={{ background: C.surface, borderRadius: 8, padding: "10px 12px", marginBottom: 10 }}>
+                <div style={{ fontSize: 12, fontWeight: 600, color: C.muted, marginBottom: 8 }}>So sánh với lịch sử cùng loại</div>
+                {history.map(hi => {
+                  const hc = calcItem(hi);
+                  return (
+                    <div key={hi.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "5px 0", borderTop: `0.5px solid ${C.border}` }}>
+                      <div style={{ flex: 1, fontSize: 13 }}>{hi.name} <span style={{ fontSize: 11, color: C.muted }}>{hi.brand || ""}</span></div>
+                      <div style={{ fontSize: 12, textAlign: "right" }}>
+                        <div style={{ fontWeight: 500 }}>{fmt(hc.perDay)}đ/ngày</div>
+                        <div style={{ color: C.muted }}>{fmt(hi.price)}đ · {hc.days}ng</div>
+                      </div>
+                    </div>
+                  );
+                })}
+                <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 0", borderTop: `2px solid ${C.accent}`, marginTop: 4 }}>
+                  <div style={{ flex: 1, fontSize: 13, fontWeight: 600, color: C.accent }}>{w.name} (wishlist)</div>
+                  <div style={{ fontSize: 12, textAlign: "right" }}>
+                    <div style={{ fontWeight: 600, color: C.accent }}>{c.perDay ? fmt(c.perDay) + "đ/ngày" : "—"}</div>
+                    <div style={{ color: C.muted }}>{fmt(w.price)}đ · {c.estDays || "?"}ng</div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Actions */}
+            <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+              <button onClick={() => setExpandId(expanded ? null : w.id)} style={s.btnSm}>
+                {expanded ? "Thu gọn" : "So sánh chi tiết"}
+              </button>
+              <button onClick={() => onMoved(w)} style={s.btnSm}>✓ Đã mua</button>
+              <button onClick={() => onEdit(w)} style={s.btnSm}>✏️</button>
+              {w.url && <a href={w.url} target="_blank" rel="noreferrer" style={{ ...s.btnSm, textDecoration: "none" }}>🔗 Link</a>}
+              <button onClick={() => onDelete(w.id)} style={{ ...s.btnSm, color: C.red, marginLeft: "auto" }}>🗑</button>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 /* ─── MAIN APP ─── */
 const STORAGE = "dodung_v3";
 function loadState() {
@@ -741,11 +973,13 @@ export default function App() {
   const [groups, setGroups] = useState(initial?.groups || DEFAULT_GROUPS);
   const [types, setTypes] = useState(initial?.types || DEFAULT_TYPES);
   const [items, setItems] = useState(initial?.items || []);
+  const [wishes, setWishes] = useState(initial?.wishes || []);
   const [page, setPage] = useState("dashboard");
-  const [modal, setModal] = useState(null); // "add" | "edit" | "groups" | "backup"
+  const [modal, setModal] = useState(null);
   const [editItem, setEditItem] = useState(null);
+  const [editWish, setEditWish] = useState(null);
 
-  useEffect(() => saveState({ groups, types, items }), [groups, types, items]);
+  useEffect(() => saveState({ groups, types, items, wishes }), [groups, types, items, wishes]);
 
   const saveItem = it => { setItems(p => editItem ? p.map(x => x.id === it.id ? it : x) : [...p, it]); setModal(null); setEditItem(null); };
   const deleteItem = id => { if (confirm("Xoá sản phẩm này?")) setItems(p => p.filter(i => i.id !== id)); };
@@ -756,15 +990,31 @@ export default function App() {
     if (data.groups) setGroups(data.groups);
     if (data.types) setTypes(data.types);
     setItems(data.items);
+    if (data.wishes) setWishes(data.wishes);
+  };
+
+  // Wishlist handlers
+  const saveWish = w => { setWishes(p => editWish ? p.map(x => x.id === w.id ? w : x) : [...p, w]); setModal(null); setEditWish(null); };
+  const deleteWish = id => { if (confirm("Xoá khỏi wishlist?")) setWishes(p => p.filter(w => w.id !== id)); };
+  // "Đã mua" → chuyển wishlist item thành item thật, mở form thêm với dữ liệu prefilled
+  const moveToItems = w => {
+    setEditItem({ name: w.name, brand: w.brand, groupId: w.groupId, typeId: w.typeId, price: w.price, volume: w.volume, buyDate: todayStr(), startDate: todayStr(), endDate: null, expireDate: w.expireDate, notes: w.notes });
+    setWishes(p => p.filter(x => x.id !== w.id));
+    setModal("add");
   };
 
   const PAGES = [
     { id: "dashboard", icon: "📊", label: "Tổng quan" },
     { id: "items", icon: "📦", label: "Đồ dùng" },
+    { id: "wishlist", icon: "🛒", label: "Wishlist" },
     { id: "compare", icon: "⚖️", label: "So sánh" },
     { id: "optimize", icon: "🏆", label: "Tối ưu" },
   ];
-  const PAGE_TITLES = { dashboard: "Tổng quan", items: "Đồ dùng", compare: "So sánh", optimize: "Tối ưu chi phí" };
+  const PAGE_TITLES = { dashboard: "Tổng quan", items: "Đồ dùng", wishlist: "Wishlist", compare: "So sánh", optimize: "Tối ưu chi phí" };
+
+  const addBtn = page === "wishlist"
+    ? <button onClick={() => { setEditWish(null); setModal("addwish"); }} style={s.btnPrimary}>+ Thêm</button>
+    : <button onClick={() => { setEditItem(null); setModal("add"); }} style={s.btnPrimary}>+ Thêm</button>;
 
   return (
     <div style={{ background: C.bg, minHeight: "100vh", maxWidth: 430, margin: "0 auto", fontFamily: "system-ui,-apple-system,sans-serif", color: C.text, fontSize: 15, position: "relative" }}>
@@ -776,13 +1026,13 @@ export default function App() {
         </div>
         <div style={{ display: "flex", gap: 6 }}>
           <button onClick={() => setModal("backup")} style={s.btnSm} title="Backup">💾</button>
-          <button onClick={() => setModal("groups")} style={s.btnSm}>⚙️ Nhóm</button>
-          <button onClick={() => { setEditItem(null); setModal("add"); }} style={s.btnPrimary}>+ Thêm</button>
+          <button onClick={() => setModal("groups")} style={s.btnSm}>⚙️</button>
+          {addBtn}
         </div>
       </div>
 
       {/* Content */}
-      {items.length === 0 ? (
+      {items.length === 0 && page !== "wishlist" ? (
         <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", minHeight: "70vh", textAlign: "center", padding: 24 }}>
           <div style={{ fontSize: 60, marginBottom: 16 }}>📦</div>
           <div style={{ fontSize: 20, fontWeight: 700, marginBottom: 8 }}>Bắt đầu theo dõi</div>
@@ -795,6 +1045,7 @@ export default function App() {
         </div>
       ) : page === "dashboard" ? <DashboardPage items={items} groups={groups} types={types} />
         : page === "items" ? <ItemsPage items={items} groups={groups} types={types} onEdit={it => { setEditItem(it); setModal("edit"); }} onDelete={deleteItem} onMarkDone={markDone} />
+        : page === "wishlist" ? <WishlistPage wishes={wishes} items={items} groups={groups} types={types} onAdd={() => { setEditWish(null); setModal("addwish"); }} onEdit={w => { setEditWish(w); setModal("addwish"); }} onDelete={deleteWish} onMoved={moveToItems} />
         : page === "compare" ? <ComparePage items={items} groups={groups} types={types} />
         : page === "optimize" ? <OptimizePage items={items} groups={groups} types={types} />
         : null}
@@ -802,9 +1053,12 @@ export default function App() {
       {/* Bottom nav */}
       <div style={{ position: "fixed", bottom: 0, left: "50%", transform: "translateX(-50%)", width: "100%", maxWidth: 430, background: C.card, borderTop: `0.5px solid ${C.border}`, display: "flex", zIndex: 100, paddingBottom: "env(safe-area-inset-bottom, 0px)" }}>
         {PAGES.map(p => (
-          <button key={p.id} onClick={() => setPage(p.id)} style={{ flex: 1, padding: "10px 4px 8px", border: "none", background: "transparent", cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", gap: 2, color: page === p.id ? C.accent : C.faint, fontFamily: "inherit" }}>
-            <span style={{ fontSize: 20 }}>{p.icon}</span>
-            <span style={{ fontSize: 10, fontWeight: page === p.id ? 600 : 400 }}>{p.label}</span>
+          <button key={p.id} onClick={() => setPage(p.id)} style={{ flex: 1, padding: "10px 2px 8px", border: "none", background: "transparent", cursor: "pointer", display: "flex", flexDirection: "column", alignItems: "center", gap: 2, color: page === p.id ? C.accent : C.faint, fontFamily: "inherit", position: "relative" }}>
+            <span style={{ fontSize: 18 }}>{p.icon}</span>
+            <span style={{ fontSize: 9, fontWeight: page === p.id ? 600 : 400 }}>{p.label}</span>
+            {p.id === "wishlist" && wishes.length > 0 && (
+              <span style={{ position: "absolute", top: 6, right: "50%", transform: "translateX(10px)", background: C.accent, color: "#fff", borderRadius: 10, fontSize: 9, padding: "1px 5px", fontWeight: 700 }}>{wishes.length}</span>
+            )}
           </button>
         ))}
       </div>
@@ -812,6 +1066,9 @@ export default function App() {
       {/* Modals */}
       <Modal open={modal === "add" || modal === "edit"} onClose={() => { setModal(null); setEditItem(null); }} title={editItem ? "Sửa sản phẩm" : "Thêm đồ dùng"}>
         <ItemForm initial={editItem} groups={groups} types={types} onSave={saveItem} onClose={() => { setModal(null); setEditItem(null); }} />
+      </Modal>
+      <Modal open={modal === "addwish"} onClose={() => { setModal(null); setEditWish(null); }} title={editWish ? "Sửa wishlist" : "Thêm vào Wishlist"}>
+        <WishForm initial={editWish} groups={groups} types={types} onSave={saveWish} onClose={() => { setModal(null); setEditWish(null); }} />
       </Modal>
       <Modal open={modal === "groups"} onClose={() => setModal(null)} title="Quản lý nhóm & loại">
         <GroupManager groups={groups} types={types} onSave={saveGroups} onClose={() => setModal(null)} />
