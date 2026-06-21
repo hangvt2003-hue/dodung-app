@@ -933,12 +933,12 @@ function saveState(state) {
 }
 
 /* ─── BACKUP MODAL ─── */
-function BackupModal({ groups, types, items, onImport, onClose }) {
+function BackupModal({ groups, types, items, wishes, onImport, onClose }) {
   const [importError, setImportError] = useState(null);
   const [importOk, setImportOk] = useState(false);
 
   const doExport = () => {
-    const data = { version: 1, exportedAt: new Date().toISOString(), groups, types, items };
+    const data = { version: 1, exportedAt: new Date().toISOString(), groups, types, items, wishes };
     const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
@@ -979,7 +979,7 @@ function BackupModal({ groups, types, items, onImport, onClose }) {
           Tải toàn bộ đồ dùng, nhóm, loại ra file <strong>.json</strong>. Lưu file này vào máy tính, Google Drive, hoặc iCloud để backup.
         </div>
         <div style={{ fontSize: 12, color: C.muted, marginBottom: 12 }}>
-          Hiện có: <strong>{items.length} sản phẩm</strong> · {groups.length} nhóm · {types.length} loại
+          Hiện có: <strong>{items.length} sản phẩm</strong> · {groups.length} nhóm · {types.length} loại · {wishes.length} wishlist
         </div>
         <button style={s.btnPrimary} onClick={doExport}>📥 Tải file backup (.json)</button>
       </div>
@@ -1121,7 +1121,7 @@ export default function App() {
         <GroupManager groups={groups} types={types} onSave={saveGroups} onClose={() => setModal(null)} />
       </Modal>
       <Modal open={modal === "backup"} onClose={() => setModal(null)} title="💾 Backup & Khôi phục">
-        <BackupModal groups={groups} types={types} items={items} onImport={doImport} onClose={() => setModal(null)} />
+        <BackupModal groups={groups} types={types} items={items} wishes={wishes} onImport={doImport} onClose={() => setModal(null)} />
       </Modal>
     </div>
   );
