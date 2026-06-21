@@ -593,7 +593,8 @@ function DashboardPage({ items, groups, types }) {
   const activeItems = aggs.filter(({ agg }) => agg.active);
   const inUseItems = activeItems.filter(({ agg }) => agg.activePc && !calcPurchase(agg.activePc).notStarted);
   const totalSpent = aggs.reduce((s, { agg }) => s + agg.totalPrice, 0);
-  const dayCost = inUseItems.reduce((s, { agg }) => s + (agg.activePc ? calcPurchase(agg.activePc).perDay || 0 : 0), 0);
+  // Chi phí/ngày: dùng avgPerDay từ calcItem (đã fallback sang active nếu chưa có finished)
+  const dayCost = inUseItems.reduce((s, { agg }) => s + (agg.avgPerDay || 0), 0);
   const monthCost = dayCost * 30;
   const alerts = items.flatMap(it => {
     // Check all purchases for expiry
