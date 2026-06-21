@@ -591,10 +591,10 @@ function GroupManager({ groups, types, onSave, onClose }) {
 function DashboardPage({ items, groups, types }) {
   const aggs = items.map(it => ({ it, agg: calcItem(it) }));
   const activeItems = aggs.filter(({ agg }) => agg.active);
-  const inUseItems = activeItems.filter(({ agg }) => agg.activePc && !calcPurchase(agg.activePc).notStarted);
+  const inUseItems = activeItems.filter(({ agg }) => agg.activePc && !agg.activePc.notStarted);
   const totalSpent = aggs.reduce((s, { agg }) => s + agg.totalPrice, 0);
   // Chi phí/ngày: dùng avgPerDay từ calcItem (đã fallback sang active nếu chưa có finished)
-  const dayCost = inUseItems.reduce((s, { agg }) => s + (agg.avgPerDay || 0), 0);
+  const dayCost = inUseItems.reduce((s, { agg }) => s + (agg.activePc?.perDay || agg.avgPerDay || 0), 0);
   const monthCost = dayCost * 30;
   const alerts = items.flatMap(it => {
     // Check all purchases for expiry
@@ -800,7 +800,7 @@ function generateInsights(items, groups, types, wishes) {
 
     // ⚠️ Lần mua hiện tại đắt hơn TB lịch sử >20%
     if (agg.activePc && agg.finished.length >= 1) {
-      const activeCp = calcPurchase(agg.activePc);
+      const activeCp = agg.activePc;
       if (activeCp.perDay && agg.avgPerDay && activeCp.perDay > agg.avgPerDay * 1.2) {
         const pct = Math.round((activeCp.perDay - agg.avgPerDay) / agg.avgPerDay * 100);
         insights.push({ type: "warn", icon: "⚠️", text: `${icon} ${it.name} đang tốn hơn TB lịch sử ${pct}% (${fmt(activeCp.perDay)}đ/ngày vs TB ${fmt(agg.avgPerDay)}đ/ngày)` });
@@ -821,7 +821,7 @@ function generateInsights(items, groups, types, wishes) {
     }
 
     // 🔄 Sắp hết dựa trên tốc độ dùng TB
-    if (agg.activePc && agg.avgMlPerDay && agg.activePc.volume > 0 && !calcPurchase(agg.activePc).notStarted) {
+    if (agg.activePc && agg.avgMlPerDay && agg.activePc.volume > 0 && !agg.activePc.notStarted) {
       const startDate = agg.activePc.startDate;
       const daysUsed = daysBetween(startDate, todayStr());
       const volUsed = daysUsed * agg.avgMlPerDay;
