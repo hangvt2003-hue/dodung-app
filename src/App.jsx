@@ -84,24 +84,39 @@ function calcItem(item) {
   // totalPrice = tất cả purchases (kể cả đang dùng và chưa dùng)
   const totalPrice = purchases.reduce((s, p) => s + (parseFloat(p.price) || 0), 0);
 
-  // avgPerDay chỉ tính từ finished (có đủ start + end)
+  // avgPerDay: ưu tiên finished, fallback sang active đang dùng
   const totalDays = finished.reduce((s, p) => s + daysBetween(p.startDate, p.endDate), 0);
   const finishedPrice = finished.reduce((s, p) => s + (parseFloat(p.price) || 0), 0);
-  const avgPerDay = totalDays > 0 ? finishedPrice / totalDays : null;
+
+  // Tính ngày đang dùng hiện tại (nếu có active và đã start)
+  const activeDays = (active && active.startDate && !calcPurchase(active).notStarted)
+    ? daysBetween(active.startDate, todayStr()) : 0;
+  const activePrice = (active && active.startDate) ? (parseFloat(active.price) || 0) : 0;
+
+  // TB/ngày: nếu có finished dùng finished, nếu chưa có dùng active hiện tại (tạm tính)
+  const avgPerDayBase = totalDays > 0 ? finishedPrice / totalDays
+    : activeDays > 0 ? activePrice / activeDays : null;
+  const avgPerDay = avgPerDayBase;
   const avgPerMonth = avgPerDay ? avgPerDay * 30 : null;
 
-  // đv/day avg from finished with volume
+  // Tổng ngày = finished + đang dùng hiện tại
+  const totalDaysAll = totalDays + activeDays;
+
+  // đv/day avg from finished with volume, fallback active
   const finWithVol = finished.filter(p => p.volume > 0);
   const avgMlPerDay = finWithVol.length > 0
     ? finWithVol.reduce((s, p) => s + p.volume / daysBetween(p.startDate, p.endDate), 0) / finWithVol.length
-    : null;
+    : (active && active.volume > 0 && activeDays > 0) ? active.volume / activeDays : null;
 
-  // Value score dùng finished price (chính xác hơn)
+  // Value score chỉ tính khi có finished
   const avgValueScore = finished.length > 0 && finishedPrice > 0
     ? parseFloat((totalDays / (finishedPrice / 1000)).toFixed(2))
     : null;
 
-  return { activePc, active, finished, avgPerDay, avgPerMonth, avgMlPerDay, avgValueScore, totalDays, totalPrice, finishedPrice, purchaseCount: purchases.length };
+  // daysToExp: lấy từ active purchase nếu có
+  const activeDaysToExp = active?.expireDate ? daysBetween(todayStr(), active.expireDate) : null;
+
+  return { activePc, active, finished, avgPerDay, avgPerMonth, avgMlPerDay, avgValueScore, totalDays: totalDaysAll, totalPrice, finishedPrice, purchaseCount: purchases.length, activeDaysToExp };
 }
 
 /* ─── MIGRATION: old flat items → new purchase structure ─── */
@@ -346,9 +361,9 @@ function ItemDetail({ item, groups, types, onClose, onEditMeta, onAddPurchase, o
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 14 }}>
         {[
           ["Tổng đã chi", fmt(agg.totalPrice) + "đ", item.purchases.length + " lần mua"],
-          ["TB chi phí/ngày", agg.avgPerDay ? fmt(agg.avgPerDay) + "đ" : "—", agg.finished.length + " chu kỳ hoàn thành"],
-          ["TB chi phí/tháng", agg.avgPerMonth ? fmt(agg.avgPerMonth) + "đ" : "—", "Trung bình dài hạn"],
-          ["Tổng ngày đã dùng", agg.totalDays + " ngày", agg.avgMlPerDay ? `TB ${agg.avgMlPerDay.toFixed(1)}đv/ngày` : ""],
+          ["TB chi phí/ngày", agg.avgPerDay ? fmt(agg.avgPerDay) + "đ" : "—", agg.finished.length > 0 ? agg.finished.length + " chu kỳ hoàn thành" : "Tạm tính từ lần hiện tại"],
+          ["TB chi phí/tháng", agg.avgPerMonth ? fmt(agg.avgPerMonth) + "đ" : "—", agg.finished.length > 0 ? "Trung bình dài hạn" : "Tạm tính"],
+          ["Tổng ngày đã dùng", agg.totalDays > 0 ? agg.totalDays + " ngày" : "—", agg.avgMlPerDay ? `TB ${agg.avgMlPerDay.toFixed(1)}đv/ngày` : ""],
         ].map(([l, v, sub]) => (
           <div key={l} style={s.metric}>
             <div style={{ fontSize: 10, color: C.muted }}>{l}</div>
@@ -580,10 +595,12 @@ function DashboardPage({ items, groups, types }) {
   const totalSpent = aggs.reduce((s, { agg }) => s + agg.totalPrice, 0);
   const dayCost = inUseItems.reduce((s, { agg }) => s + (agg.activePc ? calcPurchase(agg.activePc).perDay || 0 : 0), 0);
   const monthCost = dayCost * 30;
-  const alerts = items.flatMap(it => it.purchases.filter(p => {
-    const pc = calcPurchase(p);
-    return pc.daysToExp != null && pc.daysToExp < 30;
-  }).map(p => ({ it, p })));
+  const alerts = items.flatMap(it => {
+    // Check all purchases for expiry
+    return it.purchases
+      .filter(p => p.expireDate && daysBetween(todayStr(), p.expireDate) < 30)
+      .map(p => ({ it, p, daysLeft: daysBetween(todayStr(), p.expireDate) }));
+  });
   const catSpend = {};
   items.forEach(it => { catSpend[it.groupId] = (catSpend[it.groupId] || 0) + calcItem(it).totalPrice; });
   const catRows = Object.entries(catSpend).sort((a, b) => b[1] - a[1]).slice(0, 6).map(([gid, v]) => {
@@ -615,14 +632,11 @@ function DashboardPage({ items, groups, types }) {
       {alerts.length > 0 && (
         <div style={{ ...s.card, borderLeft: `3px solid ${C.amber}` }}>
           <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 8 }}>⚠️ Cảnh báo HSD</div>
-          {alerts.map(({ it, p }) => {
-            const pc = calcPurchase(p);
-            return (
-              <div key={p.id} style={{ fontSize: 13, padding: "5px 0", borderTop: `0.5px solid ${C.border}` }}>
-                <strong>{it.name}</strong> — {pc.daysToExp < 0 ? "đã hết hạn" : `còn ${pc.daysToExp} ngày (${fmtDate(p.expireDate)})`}
-              </div>
-            );
-          })}
+          {alerts.map(({ it, p, daysLeft }) => (
+            <div key={p.id} style={{ fontSize: 13, padding: "5px 0", borderTop: `0.5px solid ${C.border}` }}>
+              <strong>{it.name}</strong> — {daysLeft < 0 ? "đã hết hạn" : `còn ${daysLeft} ngày (${fmtDate(p.expireDate)})`}
+            </div>
+          ))}
         </div>
       )}
       <div style={s.card}>
@@ -707,7 +721,11 @@ function ItemsPage({ items, groups, types, onOpenDetail, onEdit, onDelete }) {
               {[
                 ["Tổng đã chi", fmt(agg.totalPrice) + "đ"],
                 ["TB/ngày", agg.avgPerDay ? fmt(agg.avgPerDay) + "đ" : "—"],
-                ["Hiện tại", activeCp && !activeCp.notStarted ? fmt(activeCp.perDay) + "đ" : "—"],
+                [agg.finished.length > 0 ? "Hiện tại" : "Ngày đã dùng",
+                  agg.finished.length > 0
+                    ? (activeCp && !activeCp.notStarted ? fmt(activeCp.perDay) + "đ" : "—")
+                    : (agg.totalDays > 0 ? agg.totalDays + " ngày" : "—")
+                ],
               ].map(([l, v]) => (
                 <div key={l} style={{ background: C.surface, borderRadius: 7, padding: "6px 8px" }}>
                   <div style={{ fontSize: 10, color: C.muted }}>{l}</div>
@@ -1376,19 +1394,34 @@ function WishlistPage({ wishes, items, groups, types, onAdd, onEdit, onDelete, o
                     <div key={h} style={{ fontSize: 10, color: C.faint, fontWeight: 600, textAlign: h === "Sản phẩm" ? "left" : "right" }}>{h}</div>
                   ))}
                 </div>
-                {history.flatMap(it => it.purchases.filter(p => p.endDate && p.startDate).map(p => {
-                  const days = daysBetween(p.startDate, p.endDate);
-                  const pd = (parseFloat(p.price) || 0) / days;
-                  const pml = p.volume > 0 ? parseFloat(p.price) / p.volume : null;
-                  return (
-                    <div key={p.id} style={{ display: "grid", gridTemplateColumns: "1fr 72px 60px 56px", gap: 4, padding: "5px 0", borderTop: `0.5px solid ${C.border}` }}>
-                      <div style={{ fontSize: 11 }}>{it.name} <span style={{ color: C.muted }}>{it.brand || ""}</span></div>
-                      <div style={{ fontSize: 11, textAlign: "right", fontWeight: 500 }}>{fmt(pd)}đ</div>
-                      <div style={{ fontSize: 11, textAlign: "right", color: C.muted }}>{pml ? pml.toFixed(1) + "đ" : "—"}</div>
-                      <div style={{ fontSize: 11, textAlign: "right", color: C.muted }}>{days}ng</div>
-                    </div>
-                  );
-                }))}
+                {history.flatMap(it => {
+                  // Lấy TẤT CẢ purchases có volume để tính đ/đv, không cần endDate
+                  // Với đ/ngày: chỉ hiện nếu có startDate
+                  return it.purchases
+                    .filter(p => p.volume > 0 || (p.startDate)) // có đv hoặc đang/đã dùng
+                    .map(p => {
+                      const agg = calcItem(it);
+                      const hasFinished = p.endDate && p.startDate;
+                      const isActive = !p.endDate && p.startDate;
+                      const days = hasFinished ? daysBetween(p.startDate, p.endDate)
+                        : isActive ? daysBetween(p.startDate, todayStr()) : null;
+                      const pd = days ? (parseFloat(p.price) || 0) / days : null;
+                      const pml = p.volume > 0 ? parseFloat(p.price) / p.volume : null;
+                      const statusLabel = hasFinished ? days + "ng" : isActive ? days + "ng*" : "Chưa dùng";
+                      return (
+                        <div key={p.id} style={{ display: "grid", gridTemplateColumns: "1fr 72px 60px 56px", gap: 4, padding: "5px 0", borderTop: `0.5px solid ${C.border}` }}>
+                          <div style={{ fontSize: 11 }}>
+                            {it.name} <span style={{ color: C.muted }}>{it.brand || ""}</span>
+                            {isActive && <span style={{ fontSize: 9, color: C.green, marginLeft: 3 }}>●</span>}
+                            {!p.startDate && <span style={{ fontSize: 9, color: C.indigo, marginLeft: 3 }}>chưa dùng</span>}
+                          </div>
+                          <div style={{ fontSize: 11, textAlign: "right", fontWeight: 500, color: pd ? C.text : C.faint }}>{pd ? fmt(pd) + "đ" : "—"}</div>
+                          <div style={{ fontSize: 11, textAlign: "right", color: C.muted }}>{pml ? pml.toFixed(1) + "đ" : "—"}</div>
+                          <div style={{ fontSize: 11, textAlign: "right", color: C.faint }}>{statusLabel}</div>
+                        </div>
+                      );
+                    });
+                })}
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 72px 60px 56px", gap: 4, padding: "7px 0 2px", borderTop: `2px solid ${C.accent}`, marginTop: 2 }}>
                   <div style={{ fontSize: 11, fontWeight: 600, color: C.accent }}>{w.name} <span style={{ fontSize: 10 }}>wishlist</span></div>
                   <div style={{ fontSize: 11, textAlign: "right", fontWeight: 700, color: C.accent }}>{c.perDay ? fmt(c.perDay) + "đ" : "—"}</div>
@@ -1398,7 +1431,9 @@ function WishlistPage({ wishes, items, groups, types, onAdd, onEdit, onDelete, o
               </div>
             )}
             <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-              {history.length > 0 && <button onClick={() => setExpandId(expanded ? null : w.id)} style={s.btnSm}>{expanded ? "Thu gọn" : "So sánh chi tiết"}</button>}
+              {(history.length > 0 && history.some(it => it.purchases.some(p => p.volume > 0 || p.startDate))) && (
+                <button onClick={() => setExpandId(expanded ? null : w.id)} style={s.btnSm}>{expanded ? "Thu gọn" : "So sánh đ/đv"}</button>
+              )}
               <button onClick={() => onMoved(w)} style={s.btnSm}>✓ Đã mua</button>
               <button onClick={() => onEdit(w)} style={s.btnSm}>✏️</button>
               {w.url && <a href={w.url} target="_blank" rel="noreferrer" style={{ ...s.btnSm, textDecoration: "none" }}>🔗</a>}
