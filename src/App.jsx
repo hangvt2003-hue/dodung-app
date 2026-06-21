@@ -345,7 +345,7 @@ function ItemDetail({ item, groups, types, onClose, onEditMeta, onAddPurchase, o
           ["Tổng đã chi", fmt(agg.totalPrice) + "đ", item.purchases.length + " lần mua"],
           ["TB chi phí/ngày", agg.avgPerDay ? fmt(agg.avgPerDay) + "đ" : "—", agg.finished.length + " chu kỳ hoàn thành"],
           ["TB chi phí/tháng", agg.avgPerMonth ? fmt(agg.avgPerMonth) + "đ" : "—", "Trung bình dài hạn"],
-          ["Tổng ngày đã dùng", agg.totalDays + " ngày", agg.avgMlPerDay ? `TB ${agg.avgMlPerDay.toFixed(1)}ml/ngày` : ""],
+          ["Tổng ngày đã dùng", agg.totalDays + " ngày", agg.avgMlPerDay ? `TB ${agg.avgMlPerDay.toFixed(1)}đv/ngày` : ""],
         ].map(([l, v, sub]) => (
           <div key={l} style={s.metric}>
             <div style={{ fontSize: 10, color: C.muted }}>{l}</div>
@@ -416,7 +416,7 @@ function ItemDetail({ item, groups, types, onClose, onEditMeta, onAddPurchase, o
               </div>
               <div style={{ fontSize: 12, color: C.muted, marginBottom: 6 }}>
                 {fmtDate(p.buyDate)} {p.startDate ? `→ ${p.endDate ? fmtDate(p.endDate) : "nay"}` : "(chưa dùng)"}
-                {p.volume ? ` · ${fmt(p.volume)}ml` : ""}
+                {p.volume ? ` · ${fmt(p.volume)}đv` : ""}
                 {p.expireDate ? ` · HSD: ${fmtDate(p.expireDate)}` : ""}
               </div>
               <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 4 }}>
@@ -424,8 +424,8 @@ function ItemDetail({ item, groups, types, onClose, onEditMeta, onAddPurchase, o
                   ["Giá", fmt(p.price) + "đ"],
                   ["Chi phí/ngày", pc.notStarted ? "Chưa dùng" : pc.perDay ? fmt(pc.perDay) + "đ" : "—"],
                   ["Số ngày", pc.notStarted ? "—" : pc.days + "ng"],
-                  pc.costPerMl ? ["Giá/ml", pc.costPerMl.toFixed(1) + "đ"] : null,
-                  pc.mlPerDay ? ["ml/ngày", pc.mlPerDay.toFixed(1)] : null,
+                  pc.costPerMl ? ["Giá/đv", pc.costPerMl.toFixed(1) + "đ"] : null,
+                  pc.mlPerDay ? ["đv/ngày", pc.mlPerDay.toFixed(1) + "đv"] : null,
                   pc.valueScore ? ["Điểm", pc.valueScore] : null,
                 ].filter(Boolean).map(([l, v]) => (
                   <div key={l} style={{ background: C.card, borderRadius: 6, padding: "5px 7px" }}>
@@ -720,211 +720,499 @@ function ItemsPage({ items, groups, types, onOpenDetail, onEdit, onDelete }) {
   );
 }
 
-/* ─── COMPARE PAGE ─── */
-function ComparePage({ items, groups, types }) {
-  const [mode, setMode] = useState("group");
+/* ─── ANALYSIS PAGE ─── */
+
+// ── Scoring ──
+function scoreItem(it, allItems) {
+  const agg = calcItem(it);
+  if (!agg.finished.length) return null;
+
+  const totalDays = agg.totalDays;
+  const totalPrice = agg.totalPrice;
+  const totalVol = agg.finished.reduce((s, p) => s + (p.volume || 0), 0);
+  if (!totalDays || !totalPrice) return null;
+
+  // A: ngày / 1000đ
+  const A = totalDays / (totalPrice / 1000);
+
+  // B: ngày / 100đv (chỉ khi có đv)
+  const hasVol = totalVol > 0;
+  const B = hasVol ? (totalDays / totalVol) * 100 : null;
+
+  // C: chuẩn hoá chi phí/ngày trong nhóm (0-1, cao hơn = rẻ hơn)
+  const sameGroup = allItems.filter(i => i.groupId === it.groupId && calcItem(i).finished.length > 0);
+  const groupPerDays = sameGroup.map(i => calcItem(i).avgPerDay).filter(Boolean);
+  const maxPD = Math.max(...groupPerDays);
+  const minPD = Math.min(...groupPerDays);
+  const C = maxPD === minPD ? 1 : 1 - (agg.avgPerDay - minPD) / (maxPD - minPD);
+
+  let score;
+  if (hasVol) {
+    score = A * 0.5 + B * 0.3 + C * 10 * 0.2;
+  } else {
+    score = A * 0.7 + C * 10 * 0.3;
+  }
+
+  return { score: parseFloat(score.toFixed(2)), A: parseFloat(A.toFixed(2)), B: B ? parseFloat(B.toFixed(2)) : null, C: parseFloat((C * 10).toFixed(2)), hasVol, totalDays, totalPrice, totalVol };
+}
+
+// ── Insights ──
+function generateInsights(items, groups, types, wishes) {
+  const insights = [];
+
+  items.forEach(it => {
+    const agg = calcItem(it);
+    const g = groups.find(x => x.id === it.groupId);
+    const icon = g?.icon || "📦";
+
+    // 🔺 Giá tăng qua các lần mua
+    if (it.purchases.length >= 2) {
+      const sorted = [...it.purchases].sort((a, b) => new Date(a.buyDate) - new Date(b.buyDate));
+      const last = sorted[sorted.length - 1];
+      const prev = sorted[sorted.length - 2];
+      if (last.price > prev.price * 1.1) {
+        const pct = Math.round((last.price - prev.price) / prev.price * 100);
+        insights.push({ type: "warn", icon: "🔺", text: `${icon} ${it.name} tăng giá ${pct}% so với lần trước (${fmt(prev.price)}đ → ${fmt(last.price)}đ)` });
+      }
+    }
+
+    // ⚠️ Lần mua hiện tại đắt hơn TB lịch sử >20%
+    if (agg.activePc && agg.finished.length >= 1) {
+      const activeCp = calcPurchase(agg.activePc);
+      if (activeCp.perDay && agg.avgPerDay && activeCp.perDay > agg.avgPerDay * 1.2) {
+        const pct = Math.round((activeCp.perDay - agg.avgPerDay) / agg.avgPerDay * 100);
+        insights.push({ type: "warn", icon: "⚠️", text: `${icon} ${it.name} đang tốn hơn TB lịch sử ${pct}% (${fmt(activeCp.perDay)}đ/ngày vs TB ${fmt(agg.avgPerDay)}đ/ngày)` });
+      }
+    }
+
+    // 📉 Lần gần nhất dùng lâu hơn / ngắn hơn kỳ vọng
+    if (agg.finished.length >= 2) {
+      const last = agg.finished[agg.finished.length - 1];
+      const prevFinished = agg.finished.slice(0, -1);
+      const avgDays = prevFinished.reduce((s, p) => s + daysBetween(p.startDate, p.endDate), 0) / prevFinished.length;
+      const lastDays = daysBetween(last.startDate, last.endDate);
+      if (lastDays < avgDays * 0.75) {
+        insights.push({ type: "warn", icon: "📉", text: `${icon} ${it.name} lần trước dùng chỉ ${lastDays} ngày, ngắn hơn TB ${Math.round(avgDays)} ngày` });
+      } else if (lastDays > avgDays * 1.25) {
+        insights.push({ type: "good", icon: "📈", text: `${icon} ${it.name} lần trước dùng ${lastDays} ngày, lâu hơn TB ${Math.round(avgDays)} ngày` });
+      }
+    }
+
+    // 🔄 Sắp hết dựa trên tốc độ dùng TB
+    if (agg.activePc && agg.avgMlPerDay && agg.activePc.volume > 0 && !calcPurchase(agg.activePc).notStarted) {
+      const startDate = agg.activePc.startDate;
+      const daysUsed = daysBetween(startDate, todayStr());
+      const volUsed = daysUsed * agg.avgMlPerDay;
+      const volLeft = agg.activePc.volume - volUsed;
+      const daysLeft = volLeft > 0 ? Math.round(volLeft / agg.avgMlPerDay) : 0;
+      if (daysLeft > 0 && daysLeft <= 14) {
+        insights.push({ type: "warn", icon: "🔄", text: `${icon} ${it.name} ước còn ~${daysLeft} ngày nữa là hết (dựa trên tốc độ dùng TB)` });
+      }
+    }
+  });
+
+  // 🏆 Món tối ưu nhất mỗi nhóm
+  const byGroup = {};
+  items.forEach(it => {
+    const sc = scoreItem(it, items);
+    if (!sc) return;
+    const gid = it.groupId;
+    if (!byGroup[gid] || sc.score > byGroup[gid].score) byGroup[gid] = { it, score: sc.score };
+  });
+  Object.values(byGroup).forEach(({ it, score }) => {
+    const g = groups.find(x => x.id === it.groupId);
+    insights.push({ type: "good", icon: "🏆", text: `${g?.icon} Tối ưu nhất trong nhóm "${g?.name}": ${it.name} (điểm ${score})` });
+  });
+
+  // 🏆 Món tối ưu nhất mỗi loại (chỉ khi có ≥2 món cùng loại)
+  const byType = {};
+  items.forEach(it => {
+    if (!it.typeId) return;
+    const sc = scoreItem(it, items);
+    if (!sc) return;
+    if (!byType[it.typeId]) byType[it.typeId] = [];
+    byType[it.typeId].push({ it, score: sc.score });
+  });
+  Object.entries(byType).forEach(([tid, rows]) => {
+    if (rows.length < 2) return;
+    const best = rows.reduce((b, x) => x.score > b.score ? x : b, rows[0]);
+    const t = types.find(x => x.id === tid);
+    const g = groups.find(x => x.id === best.it.groupId);
+    insights.push({ type: "good", icon: "🥇", text: `${g?.icon} Tối ưu nhất loại "${t?.name}": ${best.it.name}${best.it.brand ? " (" + best.it.brand + ")" : ""} (điểm ${best.score})` });
+  });
+
+  // 💡 Wishlist rẻ hơn món đang dùng cùng loại
+  wishes.forEach(w => {
+    const c = calcWish(w, items);
+    if (!c.perDay) return;
+    const current = items.find(i => (w.typeId && i.typeId === w.typeId || !w.typeId && i.groupId === w.groupId) && !calcItem(i).active === false && calcItem(i).activePc);
+    if (!current) return;
+    const curCp = calcPurchase(calcItem(current).activePc);
+    if (curCp.perDay && c.perDay < curCp.perDay * 0.9) {
+      const save = Math.round(curCp.perDay - c.perDay);
+      insights.push({ type: "tip", icon: "💡", text: `Wishlist "${w.name}" rẻ hơn ${current.name} đang dùng ~${fmt(save)}đ/ngày — đáng cân nhắc mua thử` });
+    }
+  });
+
+  return insights;
+}
+
+function AnalysisPage({ items, groups, types, wishes }) {
+  const [section, setSection] = useState("insights"); // insights | rank | compare
+  const [rankMode, setRankMode] = useState("score"); // score | pml
+  const [rankView, setRankView] = useState("all"); // all | bygroup
+  const [compareMode, setCompareMode] = useState("group"); // group | type
   const [selGroup, setSelGroup] = useState(null);
   const [selType, setSelType] = useState(null);
+
   const usedGroups = groups.filter(g => items.some(i => i.groupId === g.id));
   const usedTypes = types.filter(t => items.some(i => i.typeId === t.id));
 
   useEffect(() => {
-    if (mode === "group" && !selGroup && usedGroups.length) setSelGroup(usedGroups[0].id);
-    if (mode === "type" && !selType && usedTypes.length) setSelType(usedTypes[0].id);
-  }, [mode]);
+    if (compareMode === "group" && !selGroup && usedGroups.length) setSelGroup(usedGroups[0].id);
+    if (compareMode === "type" && !selType && usedTypes.length) setSelType(usedTypes[0].id);
+  }, [compareMode]);
 
-  let compareItems = mode === "group" && selGroup ? items.filter(i => i.groupId === selGroup)
-    : mode === "type" && selType ? items.filter(i => i.typeId === selType) : [];
+  // Scoring
+  const scoredItems = items
+    .map(it => ({ it, sc: scoreItem(it, items), agg: calcItem(it) }))
+    .filter(x => x.sc)
+    .sort((a, b) => b.sc.score - a.sc.score);
 
-  // Only items with at least one finished purchase (avgPerDay computed)
-  const comparable = compareItems.filter(it => calcItem(it).avgPerDay != null);
-  const notReady = compareItems.filter(it => calcItem(it).avgPerDay == null);
-  const best = comparable.length ? comparable.reduce((b, i) => calcItem(i).avgPerDay < calcItem(b).avgPerDay ? i : b, comparable[0]) : null;
+  // Price/đv ranking
+  const pmlRanked = items
+    .map(it => {
+      const vols = it.purchases.filter(p => p.volume > 0 && p.price > 0);
+      if (!vols.length) return null;
+      const avgPml = vols.reduce((s, p) => s + (parseFloat(p.price) || 0) / p.volume, 0) / vols.length;
+      return { it, avgPml, agg: calcItem(it) };
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.avgPml - b.avgPml);
 
-  return (
-    <div style={{ padding: "14px 14px 80px" }}>
-      <div style={{ display: "flex", gap: 6, marginBottom: 14 }}>
-        <button onClick={() => setMode("group")} style={mode === "group" ? s.btnSmActive : s.btnSm}>🗂 Cùng nhóm</button>
-        <button onClick={() => setMode("type")} style={mode === "type" ? s.btnSmActive : s.btnSm}>🏷 Cùng loại</button>
-      </div>
-      <div style={{ ...s.card, padding: "10px 12px", marginBottom: 10 }}>
-        <div style={{ fontSize: 12, color: C.muted, marginBottom: 8 }}>{mode === "group" ? "Chọn nhóm:" : "Chọn loại sản phẩm:"}</div>
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
-          {mode === "group" && usedGroups.map(g => (
-            <button key={g.id} onClick={() => setSelGroup(g.id)} style={selGroup === g.id ? s.btnSmActive : s.btnSm}>{g.icon} {g.name}</button>
-          ))}
-          {mode === "type" && usedTypes.map(t => {
-            const g = groups.find(x => x.id === t.groupId);
-            return <button key={t.id} onClick={() => setSelType(t.id)} style={selType === t.id ? s.btnSmActive : s.btnSm}>{g?.icon} {t.name}</button>;
-          })}
-        </div>
-      </div>
-
-      {compareItems.length === 0 ? (
-        <div style={{ textAlign: "center", padding: 40, color: C.muted }}>Chọn để so sánh</div>
-      ) : (
-        <>
-          {notReady.length > 0 && (
-            <div style={{ fontSize: 12, color: C.amber, marginBottom: 8, padding: "6px 10px", background: C.amberBg, borderRadius: 7 }}>
-              ⚠️ {notReady.map(i => i.name).join(", ")} — chưa có chu kỳ hoàn thành, không tính vào so sánh
-            </div>
-          )}
-          {comparable.length > 0 && (
-            <>
-              <MiniBar rows={[...comparable].sort((a, b) => calcItem(a).avgPerDay - calcItem(b).avgPerDay).map(it => ({
-                label: it.name + (it.brand ? ` (${it.brand})` : ""),
-                value: calcItem(it).avgPerDay,
-                valueLabel: fmt(calcItem(it).avgPerDay) + "đ/ngày TB"
-              }))} />
-              <div style={s.sep} />
-            </>
-          )}
-          {compareItems.map(it => {
-            const agg = calcItem(it);
-            const isBest = it.id === best?.id;
-            const noData = agg.avgPerDay == null;
-            const t = types.find(x => x.id === it.typeId);
-            return (
-              <div key={it.id} style={{ ...s.card, borderColor: isBest ? C.accent : C.border, borderWidth: isBest ? 1.5 : 0.5, opacity: noData ? 0.6 : 1 }}>
-                {isBest && <Badge bg={C.accentBg} color={C.accentText}>✓ Chi phí TB tốt nhất</Badge>}
-                {noData && <Badge bg={C.indigoBg} color={C.indigo}>Chưa đủ dữ liệu</Badge>}
-                <div style={{ fontWeight: 600, fontSize: 15, marginTop: 6 }}>{it.name}</div>
-                <div style={{ fontSize: 12, color: C.muted, marginBottom: 10 }}>{it.brand || "—"}{t ? ` · ${t.name}` : ""} · {agg.purchaseCount} lần mua</div>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-                  {[
-                    ["TB chi phí/ngày", agg.avgPerDay ? fmt(agg.avgPerDay) + "đ" : "—"],
-                    ["TB chi phí/tháng", agg.avgPerMonth ? fmt(agg.avgPerMonth) + "đ" : "—"],
-                    ["Tổng đã chi", fmt(agg.totalPrice) + "đ"],
-                    ["Tổng ngày dùng", agg.totalDays + " ngày"],
-                    ["TB ml/ngày", agg.avgMlPerDay ? agg.avgMlPerDay.toFixed(1) : "—"],
-                    ["Điểm giá trị TB", agg.avgValueScore || "—"],
-                  ].map(([l, v]) => (
-                    <div key={l} style={{ background: C.surface, borderRadius: 7, padding: "7px 9px" }}>
-                      <div style={{ fontSize: 10, color: C.muted }}>{l}</div>
-                      <div style={{ fontSize: 13, fontWeight: 600, marginTop: 2 }}>{v}</div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            );
-          })}
-        </>
-      )}
-    </div>
-  );
-}
-
-/* ─── OPTIMIZE PAGE ─── */
-function OptimizePage({ items, groups, types }) {
-  const [view, setView] = useState("all");
-  const scored = items
-    .map(it => ({ it, agg: calcItem(it) }))
-    .filter(({ agg }) => agg.avgValueScore != null)
-    .sort((a, b) => b.agg.avgValueScore - a.agg.avgValueScore);
+  const ranked = rankMode === "score" ? scoredItems : pmlRanked;
 
   const byGroup = {};
-  scored.forEach(x => {
+  ranked.forEach(x => {
     const gid = x.it.groupId;
     if (!byGroup[gid]) byGroup[gid] = [];
     byGroup[gid].push(x);
   });
 
-  const highCost = [...items]
-    .map(it => ({ it, agg: calcItem(it) }))
-    .filter(({ agg }) => agg.activePc && !calcPurchase(agg.activePc).notStarted)
-    .sort((a, b) => (calcPurchase(b.agg.activePc)?.perDay || 0) - (calcPurchase(a.agg.activePc)?.perDay || 0))
-    .slice(0, 5);
+  // Compare
+  let compareItems = compareMode === "group" && selGroup
+    ? items.filter(i => i.groupId === selGroup)
+    : compareMode === "type" && selType
+    ? items.filter(i => i.typeId === selType) : [];
+  const comparable = compareItems.filter(it => calcItem(it).avgPerDay != null);
+  const notReady = compareItems.filter(it => calcItem(it).avgPerDay == null);
+  const best = comparable.length ? comparable.reduce((b, i) => calcItem(i).avgPerDay < calcItem(b).avgPerDay ? i : b, comparable[0]) : null;
 
+  // Insights
+  const insights = generateInsights(items, groups, types, wishes);
   const MEDAL = ["🥇", "🥈", "🥉"];
 
   return (
     <div style={{ padding: "14px 14px 80px" }}>
-      <div style={{ ...s.card, borderLeft: `3px solid ${C.accent}`, marginBottom: 14 }}>
-        <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 4 }}>Cách tính điểm</div>
-        <div style={{ fontSize: 12, color: C.muted, lineHeight: 1.6 }}>
-          <strong>Điểm = tổng ngày dùng ÷ (tổng chi / 1.000đ)</strong> — tính trên tất cả các chu kỳ đã hoàn thành. Cao hơn = tối ưu hơn.
-        </div>
-      </div>
-      <div style={{ display: "flex", gap: 6, marginBottom: 14 }}>
-        <button onClick={() => setView("all")} style={view === "all" ? s.btnSmActive : s.btnSm}>📊 Tất cả</button>
-        <button onClick={() => setView("bygroup")} style={view === "bygroup" ? s.btnSmActive : s.btnSm}>🗂 Theo nhóm</button>
+      {/* Section tabs */}
+      <div style={{ display: "flex", background: C.surface, borderRadius: 10, padding: 3, marginBottom: 14 }}>
+        {[["insights", "💡 Insights"], ["rank", "🏆 Xếp hạng"], ["compare", "⚖️ So sánh"]].map(([id, label]) => (
+          <button key={id} onClick={() => setSection(id)} style={{ flex: 1, padding: "7px 4px", borderRadius: 8, border: "none", background: section === id ? C.card : "transparent", color: section === id ? C.text : C.muted, fontSize: 12, fontWeight: section === id ? 600 : 400, cursor: "pointer", fontFamily: "inherit", boxShadow: section === id ? "0 1px 3px rgba(0,0,0,.08)" : "none" }}>
+            {label}
+          </button>
+        ))}
       </div>
 
-      {highCost.length > 0 && (
-        <div style={s.card}>
-          <div style={{ fontSize: 13, fontWeight: 600, color: C.muted, marginBottom: 10 }}>🔥 Chi phí cao nhất hiện tại</div>
-          {highCost.map(({ it, agg }) => {
-            const g = groups.find(x => x.id === it.groupId);
-            const cp = calcPurchase(agg.activePc);
+      {/* ── INSIGHTS ── */}
+      {section === "insights" && (
+        <div>
+          {insights.length === 0 ? (
+            <div style={{ textAlign: "center", padding: 40, color: C.muted }}>
+              <div style={{ fontSize: 36, marginBottom: 12 }}>💡</div>
+              <div>Cần thêm dữ liệu để phát hiện insights</div>
+            </div>
+          ) : (
+            <>
+              {[
+                { key: "warn", label: "⚠️ Cần chú ý", bg: C.amberBg, border: C.amber, color: "#5A3500" },
+                { key: "good", label: "✅ Tín hiệu tốt", bg: C.greenBg, border: C.green, color: "#0A4A2E" },
+                { key: "tip", label: "💡 Gợi ý", bg: C.accentBg, border: C.accent, color: C.accentText },
+              ].map(({ key, label, bg, border, color }) => {
+                const group = insights.filter(i => i.type === key);
+                if (!group.length) return null;
+                return (
+                  <div key={key} style={{ marginBottom: 16 }}>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: C.muted, marginBottom: 8 }}>{label}</div>
+                    {group.map((ins, i) => (
+                      <div key={i} style={{ background: bg, borderLeft: `3px solid ${border}`, borderRadius: "0 8px 8px 0", padding: "10px 12px", marginBottom: 8, fontSize: 13, color, lineHeight: 1.5 }}>
+                        {ins.text}
+                      </div>
+                    ))}
+                  </div>
+                );
+              })}
+            </>
+          )}
+        </div>
+      )}
+
+      {/* ── XẾPHẠNG ── */}
+      {section === "rank" && (
+        <div>
+          {/* Mode selector */}
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8, marginBottom: 14 }}>
+            <div onClick={() => setRankMode("score")} style={{ background: rankMode === "score" ? C.accentBg : C.surface, border: `1px solid ${rankMode === "score" ? C.accent : "transparent"}`, borderRadius: 10, padding: "10px 12px", cursor: "pointer" }}>
+              <div style={{ fontSize: 13, fontWeight: 600, color: rankMode === "score" ? C.accent : C.text }}>⭐ Điểm tổng hợp</div>
+              <div style={{ fontSize: 11, color: C.muted, marginTop: 4, lineHeight: 1.5 }}>Kết hợp chi phí/ngày (50%), hiệu quả đv (30%), so nhóm (20%)</div>
+            </div>
+            <div onClick={() => setRankMode("pml")} style={{ background: rankMode === "pml" ? C.accentBg : C.surface, border: `1px solid ${rankMode === "pml" ? C.accent : "transparent"}`, borderRadius: 10, padding: "10px 12px", cursor: "pointer" }}>
+              <div style={{ fontSize: 13, fontWeight: 600, color: rankMode === "pml" ? C.accent : C.text }}>💧 Giá/đv</div>
+              <div style={{ fontSize: 11, color: C.muted, marginTop: 4, lineHeight: 1.5 }}>Đồng/đv trung bình. Thấp hơn = mua được nhiều hơn</div>
+            </div>
+          </div>
+
+          <div style={{ display: "flex", gap: 6, marginBottom: 14 }}>
+            <button onClick={() => setRankView("all")} style={rankView === "all" ? s.btnSmActive : s.btnSm}>📊 Tất cả</button>
+            <button onClick={() => setRankView("bygroup")} style={rankView === "bygroup" ? s.btnSmActive : s.btnSm}>🗂 Theo nhóm</button>
+            <button onClick={() => setRankView("bytype")} style={rankView === "bytype" ? s.btnSmActive : s.btnSm}>🏷 Theo loại</button>
+          </div>
+
+          {ranked.length === 0 && (
+            <div style={{ textAlign: "center", padding: 40, color: C.muted }}>
+              {rankMode === "score" ? "Cần ít nhất 1 chu kỳ hoàn thành" : "Cần nhập dung tích để xếp hạng giá/đv"}
+            </div>
+          )}
+
+          {rankView === "all" && ranked.map((x, i) => {
+            const { it } = x;
+            const agg = calcItem(it);
+            const g = groups.find(g2 => g2.id === it.groupId);
+            const t = types.find(t2 => t2.id === it.typeId);
+            const sc = x.sc;
             return (
-              <div key={it.id} style={{ ...s.row, padding: "7px 0", borderTop: `0.5px solid ${C.border}` }}>
-                <span style={{ fontSize: 20 }}>{g?.icon}</span>
-                <div style={{ flex: 1 }}><div style={{ fontWeight: 500, fontSize: 14 }}>{it.name}</div><div style={{ fontSize: 11, color: C.muted }}>{it.brand || ""}</div></div>
-                <div style={{ textAlign: "right" }}>
-                  <div style={{ fontWeight: 600, color: C.red }}>{fmt(cp.perDay)}đ/ngày</div>
-                  <div style={{ fontSize: 11, color: C.muted }}>{fmt(cp.perMonth)}đ/tháng</div>
+              <div key={it.id} style={{ ...s.card, display: "flex", gap: 10, alignItems: "flex-start" }}>
+                <div style={{ fontSize: i < 3 ? 24 : 16, minWidth: 28, paddingTop: 2, textAlign: "center" }}>{MEDAL[i] || `#${i + 1}`}</div>
+                <div style={{ flex: 1 }}>
+                  <div style={{ fontWeight: 600, fontSize: 14 }}>{it.name} {it.brand ? <span style={{ fontWeight: 400, color: C.muted, fontSize: 12 }}>({it.brand})</span> : ""}</div>
+                  <div style={{ fontSize: 11, color: C.muted, marginBottom: 8 }}>{g?.icon} {g?.name}{t ? ` · ${t.name}` : ""} · {agg.finished.length} chu kỳ</div>
+                  <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 5 }}>
+                    {[
+                      ["TB/ngày", fmt(agg.avgPerDay) + "đ"],
+                      ["TB/tháng", fmt(agg.avgPerMonth) + "đ"],
+                      ["Tổng chi", fmt(agg.totalPrice) + "đ"],
+                      ["Tổng ngày", agg.totalDays + "ng"],
+                      ["TB đv/ngày", agg.avgMlPerDay ? agg.avgMlPerDay.toFixed(1) : "—"],
+                      ["Giá/đv", (() => { const vols = it.purchases.filter(p => p.volume > 0); return vols.length ? (vols.reduce((s, p) => s + p.price / p.volume, 0) / vols.length).toFixed(2) + "đ" : "—"; })()],
+                    ].map(([l, v]) => (
+                      <div key={l} style={{ background: C.surface, borderRadius: 6, padding: "5px 7px" }}>
+                        <div style={{ fontSize: 9, color: C.muted }}>{l}</div>
+                        <div style={{ fontSize: 12, fontWeight: 600 }}>{v}</div>
+                      </div>
+                    ))}
+                  </div>
+                  {rankMode === "score" && sc && (
+                    <div style={{ fontSize: 11, color: C.muted, marginTop: 6 }}>
+                      A={sc.A} {sc.B != null ? `· B=${sc.B}` : ""} · So nhóm={sc.C}
+                    </div>
+                  )}
+                </div>
+                <div style={{ textAlign: "right", flexShrink: 0 }}>
+                  <div style={{ fontSize: 22, fontWeight: 700, color: rankMode === "score" ? C.accent : C.green }}>
+                    {rankMode === "score" ? (x.sc?.score ?? "—") : x.avgPml?.toFixed(2)}
+                  </div>
+                  <div style={{ fontSize: 10, color: C.muted }}>{rankMode === "score" ? "điểm" : "đ/đv"}</div>
                 </div>
               </div>
             );
           })}
+
+          {rankView === "bygroup" && Object.entries(byGroup).map(([gid, rows]) => {
+            const g = groups.find(x => x.id === gid) || { name: gid, icon: "📦" };
+            return (
+              <div key={gid} style={{ marginBottom: 20 }}>
+                <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 10 }}>{g.icon} {g.name}</div>
+                {rows.map((x, i) => {
+                  const { it } = x;
+                  const agg = calcItem(it);
+                  const t = types.find(t2 => t2.id === it.typeId);
+                  return (
+                    <div key={it.id} style={{ ...s.card, display: "flex", gap: 10, alignItems: "center" }}>
+                      <div style={{ fontSize: i < 3 ? 20 : 14, minWidth: 24, textAlign: "center" }}>{MEDAL[i] || `#${i + 1}`}</div>
+                      <div style={{ flex: 1 }}>
+                        <div style={{ fontWeight: 600, fontSize: 14 }}>{it.name} {it.brand ? <span style={{ fontWeight: 400, color: C.muted, fontSize: 12 }}>({it.brand})</span> : ""}</div>
+                        <div style={{ fontSize: 11, color: C.muted }}>
+                          {t?.name || ""} · {agg.finished.length} chu kỳ
+                          {rankMode === "score" ? ` · TB ${fmt(agg.avgPerDay)}đ/ngày` : ` · ${x.avgPml?.toFixed(2)}đ/đv`}
+                        </div>
+                      </div>
+                      <div style={{ textAlign: "right" }}>
+                        <div style={{ fontSize: 20, fontWeight: 700, color: rankMode === "score" ? C.accent : C.green }}>
+                          {rankMode === "score" ? (x.sc?.score ?? "—") : x.avgPml?.toFixed(2)}
+                        </div>
+                        <div style={{ fontSize: 10, color: C.muted }}>{rankMode === "score" ? "điểm" : "đ/đv"}</div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            );
+          })}
+
+          {rankView === "bytype" && (() => {
+            // Group ranked items by typeId, skip items with no typeId
+            const byType = {};
+            ranked.forEach(x => {
+              const tid = x.it.typeId;
+              if (!tid) return;
+              if (!byType[tid]) byType[tid] = [];
+              byType[tid].push(x);
+            });
+            // Also collect items with no type under each group
+            const noType = ranked.filter(x => !x.it.typeId);
+            return (
+              <>
+                {Object.entries(byType).map(([tid, rows]) => {
+                  const t = types.find(x => x.id === tid);
+                  const g = groups.find(x => x.id === rows[0]?.it.groupId);
+                  return (
+                    <div key={tid} style={{ marginBottom: 20 }}>
+                      <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 4 }}>{g?.icon} {t?.name || tid}</div>
+                      <div style={{ fontSize: 11, color: C.muted, marginBottom: 10 }}>Nhóm: {g?.name} · {rows.length} sản phẩm</div>
+                      {rows.map((x, i) => {
+                        const { it } = x;
+                        const agg = calcItem(it);
+                        return (
+                          <div key={it.id} style={{ ...s.card, display: "flex", gap: 10, alignItems: "center" }}>
+                            <div style={{ fontSize: i < 3 ? 20 : 14, minWidth: 24, textAlign: "center" }}>{MEDAL[i] || `#${i + 1}`}</div>
+                            <div style={{ flex: 1 }}>
+                              <div style={{ fontWeight: 600, fontSize: 14 }}>{it.name} {it.brand ? <span style={{ fontWeight: 400, color: C.muted, fontSize: 12 }}>({it.brand})</span> : ""}</div>
+                              <div style={{ fontSize: 11, color: C.muted }}>
+                                {agg.finished.length} chu kỳ
+                                {rankMode === "score" ? ` · TB ${fmt(agg.avgPerDay)}đ/ngày` : ` · ${x.avgPml?.toFixed(2)}đ/đv`}
+                              </div>
+                            </div>
+                            <div style={{ textAlign: "right" }}>
+                              <div style={{ fontSize: 20, fontWeight: 700, color: rankMode === "score" ? C.accent : C.green }}>
+                                {rankMode === "score" ? (x.sc?.score ?? "—") : x.avgPml?.toFixed(2)}
+                              </div>
+                              <div style={{ fontSize: 10, color: C.muted }}>{rankMode === "score" ? "điểm" : "đ/đv"}</div>
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  );
+                })}
+                {noType.length > 0 && (
+                  <div style={{ marginBottom: 20 }}>
+                    <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 10 }}>📦 Chưa phân loại</div>
+                    {noType.map((x, i) => {
+                      const { it } = x;
+                      const agg = calcItem(it);
+                      const g = groups.find(g2 => g2.id === it.groupId);
+                      return (
+                        <div key={it.id} style={{ ...s.card, display: "flex", gap: 10, alignItems: "center" }}>
+                          <div style={{ fontSize: 14, minWidth: 24, textAlign: "center" }}>{g?.icon}</div>
+                          <div style={{ flex: 1 }}>
+                            <div style={{ fontWeight: 600, fontSize: 14 }}>{it.name} {it.brand ? <span style={{ fontWeight: 400, color: C.muted, fontSize: 12 }}>({it.brand})</span> : ""}</div>
+                            <div style={{ fontSize: 11, color: C.muted }}>{g?.name} · {agg.finished.length} chu kỳ · TB {fmt(agg.avgPerDay)}đ/ngày</div>
+                          </div>
+                          <div style={{ textAlign: "right" }}>
+                            <div style={{ fontSize: 20, fontWeight: 700, color: rankMode === "score" ? C.accent : C.green }}>
+                              {rankMode === "score" ? (x.sc?.score ?? "—") : x.avgPml?.toFixed(2)}
+                            </div>
+                            <div style={{ fontSize: 10, color: C.muted }}>{rankMode === "score" ? "điểm" : "đ/đv"}</div>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </>
+            );
+          })()}
         </div>
       )}
 
-      {scored.length === 0 && <div style={{ textAlign: "center", padding: 40, color: C.muted }}>Cần ít nhất 1 chu kỳ hoàn thành để tính điểm</div>}
+      {/* ── SO SÁNH ── */}
+      {section === "compare" && (
+        <div>
+          <div style={{ display: "flex", gap: 6, marginBottom: 12 }}>
+            <button onClick={() => setCompareMode("group")} style={compareMode === "group" ? s.btnSmActive : s.btnSm}>🗂 Cùng nhóm</button>
+            <button onClick={() => setCompareMode("type")} style={compareMode === "type" ? s.btnSmActive : s.btnSm}>🏷 Cùng loại</button>
+          </div>
 
-      {view === "all" && scored.map(({ it, agg }, i) => {
-        const g = groups.find(x => x.id === it.groupId);
-        const t = types.find(x => x.id === it.typeId);
-        return (
-          <div key={it.id} style={{ ...s.card, display: "flex", gap: 10, alignItems: "flex-start" }}>
-            <div style={{ fontSize: i < 3 ? 24 : 16, minWidth: 28, textAlign: "center" }}>{MEDAL[i] || `#${i + 1}`}</div>
-            <div style={{ flex: 1 }}>
-              <div style={{ fontWeight: 600, fontSize: 14 }}>{it.name}</div>
-              <div style={{ fontSize: 12, color: C.muted }}>{g?.icon} {g?.name}{t ? ` · ${t.name}` : ""} · {agg.finished.length} chu kỳ</div>
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6, marginTop: 8 }}>
-                {[["TB/ngày", fmt(agg.avgPerDay) + "đ"], ["TB/tháng", fmt(agg.avgPerMonth) + "đ"], ["Tổng chi", fmt(agg.totalPrice) + "đ"], ["Tổng ngày", agg.totalDays + "ng"]].map(([l, v]) => (
-                  <div key={l} style={{ background: C.surface, borderRadius: 6, padding: "6px 8px" }}>
-                    <div style={{ fontSize: 10, color: C.muted }}>{l}</div>
-                    <div style={{ fontSize: 13, fontWeight: 600 }}>{v}</div>
-                  </div>
-                ))}
-              </div>
-            </div>
-            <div style={{ textAlign: "right", flexShrink: 0 }}>
-              <div style={{ fontSize: 22, fontWeight: 700, color: C.accent }}>{agg.avgValueScore}</div>
-              <div style={{ fontSize: 10, color: C.muted }}>điểm</div>
+          <div style={{ ...s.card, padding: "10px 12px", marginBottom: 12 }}>
+            <div style={{ fontSize: 12, color: C.muted, marginBottom: 8 }}>{compareMode === "group" ? "Chọn nhóm:" : "Chọn loại:"}</div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+              {compareMode === "group" && usedGroups.map(g => (
+                <button key={g.id} onClick={() => setSelGroup(g.id)} style={selGroup === g.id ? s.btnSmActive : s.btnSm}>{g.icon} {g.name}</button>
+              ))}
+              {compareMode === "type" && usedTypes.map(t => {
+                const g = groups.find(x => x.id === t.groupId);
+                return <button key={t.id} onClick={() => setSelType(t.id)} style={selType === t.id ? s.btnSmActive : s.btnSm}>{g?.icon} {t.name}</button>;
+              })}
             </div>
           </div>
-        );
-      })}
 
-      {view === "bygroup" && Object.entries(byGroup).map(([gid, rows]) => {
-        const g = groups.find(x => x.id === gid) || { name: gid, icon: "📦" };
-        return (
-          <div key={gid} style={{ marginBottom: 20 }}>
-            <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 10 }}>{g.icon} {g.name}</div>
-            {rows.map(({ it, agg }, i) => {
-              const t = types.find(x => x.id === it.typeId);
-              return (
-                <div key={it.id} style={{ ...s.card, display: "flex", gap: 10, alignItems: "center" }}>
-                  <div style={{ fontSize: i < 3 ? 20 : 14, minWidth: 24, textAlign: "center" }}>{MEDAL[i] || `#${i + 1}`}</div>
-                  <div style={{ flex: 1 }}>
-                    <div style={{ fontWeight: 600, fontSize: 14 }}>{it.name} {it.brand ? <span style={{ fontWeight: 400, color: C.muted, fontSize: 12 }}>({it.brand})</span> : ""}</div>
-                    <div style={{ fontSize: 11, color: C.muted }}>{t?.name || ""} · {agg.finished.length} chu kỳ · TB {fmt(agg.avgPerDay)}đ/ngày</div>
-                  </div>
-                  <div style={{ textAlign: "right" }}>
-                    <div style={{ fontSize: 20, fontWeight: 700, color: C.accent }}>{agg.avgValueScore}</div>
-                    <div style={{ fontSize: 10, color: C.muted }}>điểm</div>
-                  </div>
+          {compareItems.length === 0 ? (
+            <div style={{ textAlign: "center", padding: 30, color: C.muted }}>Chọn để so sánh</div>
+          ) : (
+            <>
+              {notReady.length > 0 && (
+                <div style={{ fontSize: 12, color: C.amber, marginBottom: 8, padding: "6px 10px", background: C.amberBg, borderRadius: 7 }}>
+                  ⚠️ {notReady.map(i => i.name).join(", ")} — chưa có chu kỳ hoàn thành
                 </div>
-              );
-            })}
-          </div>
-        );
-      })}
+              )}
+              {comparable.length > 0 && (
+                <MiniBar rows={[...comparable].sort((a, b) => calcItem(a).avgPerDay - calcItem(b).avgPerDay).map(it => ({
+                  label: it.name + (it.brand ? ` (${it.brand})` : ""),
+                  value: calcItem(it).avgPerDay,
+                  valueLabel: fmt(calcItem(it).avgPerDay) + "đ/ngày TB"
+                }))} />
+              )}
+              <div style={s.sep} />
+              {compareItems.map(it => {
+                const agg = calcItem(it);
+                const isBest = it.id === best?.id;
+                const noData = !agg.avgPerDay;
+                const t = types.find(x => x.id === it.typeId);
+                const sc = scoreItem(it, items);
+                const avgPml = (() => { const vols = it.purchases.filter(p => p.volume > 0); return vols.length ? vols.reduce((s, p) => s + p.price / p.volume, 0) / vols.length : null; })();
+                return (
+                  <div key={it.id} style={{ ...s.card, borderColor: isBest ? C.accent : C.border, borderWidth: isBest ? 1.5 : 0.5, opacity: noData ? 0.6 : 1 }}>
+                    {isBest && <Badge bg={C.accentBg} color={C.accentText}>✓ Chi phí TB tốt nhất</Badge>}
+                    {noData && <Badge bg={C.indigoBg} color={C.indigo}>Chưa đủ dữ liệu</Badge>}
+                    <div style={{ fontWeight: 600, fontSize: 15, marginTop: 6 }}>{it.name} {it.brand ? <span style={{ fontWeight: 400, color: C.muted, fontSize: 12 }}>({it.brand})</span> : ""}</div>
+                    <div style={{ fontSize: 12, color: C.muted, marginBottom: 10 }}>{t ? t.name : ""} · {agg.purchaseCount} lần mua · {agg.finished.length} chu kỳ</div>
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 7, marginBottom: 8 }}>
+                      {[
+                        ["TB chi phí/ngày", agg.avgPerDay ? fmt(agg.avgPerDay) + "đ" : "—"],
+                        ["TB chi phí/tháng", agg.avgPerMonth ? fmt(agg.avgPerMonth) + "đ" : "—"],
+                        ["Tổng đã chi", fmt(agg.totalPrice) + "đ"],
+                        ["Tổng ngày dùng", agg.totalDays + " ngày"],
+                        ["TB đv/ngày", agg.avgMlPerDay ? agg.avgMlPerDay.toFixed(1) : "—"],
+                        ["TB giá/đv", avgPml ? avgPml.toFixed(2) + "đ" : "—"],
+                        ["Điểm tổng hợp", sc ? sc.score : "—"],
+                        ["A/B/C", sc ? `${sc.A}/${sc.B ?? "—"}/${sc.C}` : "—"],
+                      ].map(([l, v]) => (
+                        <div key={l} style={{ background: C.surface, borderRadius: 7, padding: "7px 9px" }}>
+                          <div style={{ fontSize: 10, color: C.muted }}>{l}</div>
+                          <div style={{ fontSize: 13, fontWeight: 600, marginTop: 2 }}>{v}</div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })}
+            </>
+          )}
+        </div>
+      )}
     </div>
   );
 }
+
 
 /* ─── WISHLIST ─── */
 function calcWish(wish, items) {
@@ -1053,7 +1341,7 @@ function WishlistPage({ wishes, items, groups, types, onAdd, onEdit, onDelete, o
               </div>
               <div style={{ textAlign: "right" }}>
                 <div style={{ fontWeight: 700, fontSize: 15 }}>{fmt(w.price)}đ</div>
-                {w.volume ? <div style={{ fontSize: 11, color: C.muted }}>{fmt(w.volume)}ml</div> : null}
+                {w.volume ? <div style={{ fontSize: 11, color: C.muted }}>{fmt(w.volume)}đv</div> : null}
               </div>
             </div>
             {bestHistPc && c.perDay && (
@@ -1081,7 +1369,7 @@ function WishlistPage({ wishes, items, groups, types, onAdd, onEdit, onDelete, o
               <div style={{ background: C.surface, borderRadius: 8, padding: "10px 12px", marginBottom: 10 }}>
                 <div style={{ fontSize: 12, fontWeight: 600, color: C.muted, marginBottom: 8 }}>So sánh chi tiết</div>
                 <div style={{ display: "grid", gridTemplateColumns: "1fr 72px 60px 56px", gap: 4, padding: "4px 0 6px", borderBottom: `1px solid ${C.border}` }}>
-                  {["Sản phẩm", "đ/ngày", "đ/ml", "Ngày"].map(h => (
+                  {["Sản phẩm", "đ/ngày", "đ/đv", "Ngày"].map(h => (
                     <div key={h} style={{ fontSize: 10, color: C.faint, fontWeight: 600, textAlign: h === "Sản phẩm" ? "left" : "right" }}>{h}</div>
                   ))}
                 </div>
@@ -1235,12 +1523,12 @@ export default function App() {
     { id: "dashboard", icon: "📊", label: "Tổng quan" },
     { id: "items", icon: "📦", label: "Đồ dùng" },
     { id: "wishlist", icon: "🛒", label: "Wishlist" },
-    { id: "compare", icon: "⚖️", label: "So sánh" },
-    { id: "optimize", icon: "🏆", label: "Tối ưu" },
+    { id: "analysis", icon: "📈", label: "Phân tích" },
   ];
-  const PAGE_TITLES = { dashboard: "Tổng quan", items: "Đồ dùng", wishlist: "Wishlist", compare: "So sánh", optimize: "Tối ưu chi phí" };
+  const PAGE_TITLES = { dashboard: "Tổng quan", items: "Đồ dùng", wishlist: "Wishlist", analysis: "Phân tích" };
   const addBtn = page === "wishlist"
     ? <button onClick={() => { setEditWish(null); setModal("addwish"); }} style={s.btnPrimary}>+ Thêm</button>
+    : page === "analysis" ? null
     : <button onClick={() => { setEditItem(null); setModal("add"); }} style={s.btnPrimary}>+ Thêm</button>;
 
   return (
@@ -1271,8 +1559,7 @@ export default function App() {
       ) : page === "dashboard" ? <DashboardPage items={items} groups={groups} types={types} />
         : page === "items" ? <ItemsPage items={items} groups={groups} types={types} onOpenDetail={it => { setDetailItem(it); setModal("detail"); }} onEdit={it => { setEditItem(it); setModal("add"); }} onDelete={deleteItem} />
         : page === "wishlist" ? <WishlistPage wishes={wishes} items={items} groups={groups} types={types} onAdd={() => { setEditWish(null); setModal("addwish"); }} onEdit={w => { setEditWish(w); setModal("addwish"); }} onDelete={deleteWish} onMoved={moveToItems} />
-        : page === "compare" ? <ComparePage items={items} groups={groups} types={types} />
-        : page === "optimize" ? <OptimizePage items={items} groups={groups} types={types} />
+        : page === "analysis" ? <AnalysisPage items={items} groups={groups} types={types} wishes={wishes} />
         : null}
 
       <div style={{ position: "fixed", bottom: 0, left: "50%", transform: "translateX(-50%)", width: "100%", maxWidth: 430, background: C.card, borderTop: `0.5px solid ${C.border}`, display: "flex", zIndex: 100, paddingBottom: "env(safe-area-inset-bottom,0px)" }}>
