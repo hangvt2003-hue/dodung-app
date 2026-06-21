@@ -81,24 +81,27 @@ function calcItem(item) {
   const active = purchases.find(p => !p.endDate);
   const activePc = active ? calcPurchase(active) : null;
 
-  // Long-term avg: over all finished purchases
+  // totalPrice = tất cả purchases (kể cả đang dùng và chưa dùng)
+  const totalPrice = purchases.reduce((s, p) => s + (parseFloat(p.price) || 0), 0);
+
+  // avgPerDay chỉ tính từ finished (có đủ start + end)
   const totalDays = finished.reduce((s, p) => s + daysBetween(p.startDate, p.endDate), 0);
-  const totalPrice = finished.reduce((s, p) => s + (parseFloat(p.price) || 0), 0);
-  const avgPerDay = totalDays > 0 ? totalPrice / totalDays : null;
+  const finishedPrice = finished.reduce((s, p) => s + (parseFloat(p.price) || 0), 0);
+  const avgPerDay = totalDays > 0 ? finishedPrice / totalDays : null;
   const avgPerMonth = avgPerDay ? avgPerDay * 30 : null;
 
-  // ml/day avg from finished with volume
+  // đv/day avg from finished with volume
   const finWithVol = finished.filter(p => p.volume > 0);
   const avgMlPerDay = finWithVol.length > 0
     ? finWithVol.reduce((s, p) => s + p.volume / daysBetween(p.startDate, p.endDate), 0) / finWithVol.length
     : null;
 
-  // Value score: avg days per 1000đ
-  const avgValueScore = finished.length > 0 && totalPrice > 0
-    ? parseFloat((totalDays / (totalPrice / 1000)).toFixed(2))
+  // Value score dùng finished price (chính xác hơn)
+  const avgValueScore = finished.length > 0 && finishedPrice > 0
+    ? parseFloat((totalDays / (finishedPrice / 1000)).toFixed(2))
     : null;
 
-  return { activePc, active, finished, avgPerDay, avgPerMonth, avgMlPerDay, avgValueScore, totalDays, totalPrice, purchaseCount: purchases.length };
+  return { activePc, active, finished, avgPerDay, avgPerMonth, avgMlPerDay, avgValueScore, totalDays, totalPrice, finishedPrice, purchaseCount: purchases.length };
 }
 
 /* ─── MIGRATION: old flat items → new purchase structure ─── */
