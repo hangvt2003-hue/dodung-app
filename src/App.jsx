@@ -170,10 +170,31 @@ function ItemForm({ initial, groups, types, onSave, onClose }) {
       </div>
       <div style={s.sep} />
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginBottom: 10 }}>
-        <div><label style={s.label}>Ngày mua *</label><input style={s.input} type="date" value={f.buyDate} onChange={e => set("buyDate", e.target.value)} /></div>
-        <div><label style={s.label}>Ngày bắt đầu dùng</label><input style={s.input} type="date" value={f.startDate} onChange={e => set("startDate", e.target.value)} /></div>
-        <div><label style={s.label}>Ngày dùng hết</label><input style={s.input} type="date" value={f.endDate || ""} onChange={e => set("endDate", e.target.value)} /></div>
-        <div><label style={s.label}>Hạn sử dụng (HSD)</label><input style={s.input} type="date" value={f.expireDate || ""} onChange={e => set("expireDate", e.target.value)} /></div>
+        <div>
+          <label style={s.label}>Ngày mua *</label>
+          <input style={s.input} type="date" value={f.buyDate} onChange={e => set("buyDate", e.target.value)} />
+        </div>
+        <div>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 5 }}>
+            <label style={{ ...s.label, marginBottom: 0 }}>Ngày bắt đầu dùng</label>
+            {f.startDate && <button type="button" onClick={() => set("startDate", "")} style={{ fontSize: 11, color: C.muted, background: "none", border: "none", cursor: "pointer", padding: 0 }}>✕ Xoá</button>}
+          </div>
+          <input style={s.input} type="date" value={f.startDate || ""} onChange={e => set("startDate", e.target.value)} />
+        </div>
+        <div>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 5 }}>
+            <label style={{ ...s.label, marginBottom: 0 }}>Ngày dùng hết</label>
+            {f.endDate && <button type="button" onClick={() => set("endDate", "")} style={{ fontSize: 11, color: C.muted, background: "none", border: "none", cursor: "pointer", padding: 0 }}>✕ Xoá</button>}
+          </div>
+          <input style={s.input} type="date" value={f.endDate || ""} onChange={e => set("endDate", e.target.value)} />
+        </div>
+        <div>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 5 }}>
+            <label style={{ ...s.label, marginBottom: 0 }}>Hạn sử dụng (HSD)</label>
+            {f.expireDate && <button type="button" onClick={() => set("expireDate", "")} style={{ fontSize: 11, color: C.muted, background: "none", border: "none", cursor: "pointer", padding: 0 }}>✕ Xoá</button>}
+          </div>
+          <input style={s.input} type="date" value={f.expireDate || ""} onChange={e => set("expireDate", e.target.value)} />
+        </div>
       </div>
       <div style={{ marginBottom: 14 }}><label style={s.label}>Ghi chú</label><textarea style={{ ...s.input, resize: "vertical" }} rows={2} value={f.notes} onChange={e => set("notes", e.target.value)} placeholder="Mua ở đâu, đánh giá..." /></div>
       <div style={{ display: "flex", gap: 8 }}>
@@ -514,7 +535,9 @@ function ComparePage({ items, groups, types }) {
   if (mode === "group" && selGroup) compareItems = items.filter(i => i.groupId === selGroup);
   if (mode === "type" && selType) compareItems = items.filter(i => i.typeId === selType);
 
-  const best = compareItems.length ? compareItems.reduce((b, i) => calcItem(i).perDay < calcItem(b).perDay ? i : b, compareItems[0]) : null;
+  // Chỉ so sánh món đã có chi phí/ngày (đã bắt đầu dùng hoặc đã hết)
+  const comparableItems = compareItems.filter(i => !calcItem(i).notStarted);
+  const best = comparableItems.length ? comparableItems.reduce((b, i) => calcItem(i).perDay < calcItem(b).perDay ? i : b, comparableItems[0]) : null;
 
   return (
     <div style={{ padding: "14px 14px 80px" }}>
@@ -552,9 +575,9 @@ function ComparePage({ items, groups, types }) {
       ) : (
         <>
           <div style={{ fontSize: 12, color: C.muted, marginBottom: 8 }}>
-            {compareItems.length} sản phẩm · {mode === "group" ? "Nhóm: " + groups.find(g => g.id === selGroup)?.name : "Loại: " + types.find(t => t.id === selType)?.name}
+            {compareItems.length} sản phẩm{comparableItems.length < compareItems.length ? ` (${compareItems.length - comparableItems.length} chưa dùng, không tính)` : ""} · {mode === "group" ? "Nhóm: " + groups.find(g => g.id === selGroup)?.name : "Loại: " + types.find(t => t.id === selType)?.name}
           </div>
-          <MiniBar rows={[...compareItems].sort((a, b) => calcItem(a).perDay - calcItem(b).perDay).map((it, i) => ({
+          <MiniBar rows={[...comparableItems].sort((a, b) => calcItem(a).perDay - calcItem(b).perDay).map((it, i) => ({
             label: it.name + (it.brand ? ` (${it.brand})` : ""),
             value: calcItem(it).perDay,
             valueLabel: fmt(calcItem(it).perDay) + "đ/ngày"
@@ -562,10 +585,11 @@ function ComparePage({ items, groups, types }) {
           <div style={{ height: 1, background: C.border, margin: "14px 0" }} />
           {compareItems.map(it => {
             const c = calcItem(it);
-            const isBest = it.id === best?.id;
+            const isBest = !c.notStarted && it.id === best?.id;
             const type = types.find(t => t.id === it.typeId);
             return (
               <div key={it.id} style={{ ...s.card, borderColor: isBest ? C.accent : C.border, borderWidth: isBest ? 1.5 : 0.5 }}>
+                {c.notStarted && <Badge color="#EEF2FF" text_color="#6366F1">Chưa dùng — chưa tính</Badge>}
                 {isBest && <Badge color={C.accentBg} text_color={C.accentText}>✓ Chi phí tốt nhất</Badge>}
                 <div style={{ fontWeight: 600, fontSize: 15, marginTop: isBest ? 6 : 0 }}>{it.name}</div>
                 <div style={{ fontSize: 12, color: C.muted, marginBottom: 10 }}>{it.brand || "—"}{type ? ` · ${type.name}` : ""}</div>
@@ -660,26 +684,27 @@ function calcWish(wish, items, types) {
   const volume = parseFloat(wish.volume) || 0;
 
   // Tìm lịch sử: ưu tiên cùng typeId, rồi cùng groupId
-  const history = items.filter(i => i.endDate && (
+  const history = items.filter(i =>
     (wish.typeId && i.typeId === wish.typeId) ||
     (!wish.typeId && i.groupId === wish.groupId)
-  ));
+  );
+  const historyFinished = history.filter(i => i.endDate && i.startDate);
 
   let mlPerDay = null, estDays = null, estDaysSource = "—", avgPerDay = null;
 
-  if (history.length > 0) {
-    // Trung bình ml/ngày từ lịch sử có volume
-    const withVol = history.filter(i => i.volume > 0);
+  if (historyFinished.length > 0) {
+    // Trung bình ml/ngày từ lịch sử đã hết có volume
+    const withVol = historyFinished.filter(i => i.volume > 0);
     if (withVol.length > 0) {
       const rates = withVol.map(i => {
-        const days = daysBetween(i.startDate || i.buyDate, i.endDate);
+        const days = daysBetween(i.startDate, i.endDate);
         return i.volume / days;
       });
       mlPerDay = rates.reduce((a, b) => a + b, 0) / rates.length;
     }
-    // Trung bình chi phí/ngày từ lịch sử
-    const perDays = history.map(i => {
-      const days = daysBetween(i.startDate || i.buyDate, i.endDate);
+    // Trung bình chi phí/ngày từ lịch sử đã hết
+    const perDays = historyFinished.map(i => {
+      const days = daysBetween(i.startDate, i.endDate);
       return (parseFloat(i.price) || 0) / days;
     });
     avgPerDay = perDays.reduce((a, b) => a + b, 0) / perDays.length;
@@ -784,10 +809,12 @@ function WishlistPage({ wishes, items, groups, types, onAdd, onEdit, onDelete, o
         const expanded = expandId === w.id;
 
         // So sánh với lịch sử cùng loại/nhóm
-        const history = items.filter(i => i.endDate && (
+        // Lịch sử: dùng tất cả món (kể cả đang dùng) để tính đ/ml, chỉ dùng đã hết để tính ngày
+        const history = items.filter(i =>
           (w.typeId && i.typeId === w.typeId) || (!w.typeId && i.groupId === w.groupId)
-        ));
-        const bestHistory = history.length > 0 ? history.reduce((b, i) => calcItem(i).perDay < calcItem(b).perDay ? i : b, history[0]) : null;
+        );
+        const historyFinished = history.filter(i => i.endDate);
+        const bestHistory = historyFinished.length > 0 ? historyFinished.reduce((b, i) => calcItem(i).perDay < calcItem(b).perDay ? i : b, historyFinished[0]) : null;
         const bestPerDay = bestHistory ? calcItem(bestHistory).perDay : null;
         const isBetter = c.perDay && bestPerDay && c.perDay < bestPerDay;
         const isWorse = c.perDay && bestPerDay && c.perDay > bestPerDay * 1.1;
@@ -846,24 +873,31 @@ function WishlistPage({ wishes, items, groups, types, onAdd, onEdit, onDelete, o
             {expanded && history.length > 0 && (
               <div style={{ background: C.surface, borderRadius: 8, padding: "10px 12px", marginBottom: 10 }}>
                 <div style={{ fontSize: 12, fontWeight: 600, color: C.muted, marginBottom: 8 }}>So sánh với lịch sử cùng loại</div>
+                {/* Header row */}
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 80px 70px 60px", gap: 4, padding: "4px 0 6px", borderBottom: `1px solid ${C.border}` }}>
+                  {["Sản phẩm","đ/ngày","đ/ml","Ngày"].map(h => (
+                    <div key={h} style={{ fontSize: 10, color: C.faint, fontWeight: 600, textAlign: h === "Sản phẩm" ? "left" : "right" }}>{h}</div>
+                  ))}
+                </div>
                 {history.map(hi => {
                   const hc = calcItem(hi);
                   return (
-                    <div key={hi.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "5px 0", borderTop: `0.5px solid ${C.border}` }}>
-                      <div style={{ flex: 1, fontSize: 13 }}>{hi.name} <span style={{ fontSize: 11, color: C.muted }}>{hi.brand || ""}</span></div>
-                      <div style={{ fontSize: 12, textAlign: "right" }}>
-                        <div style={{ fontWeight: 500 }}>{fmt(hc.perDay)}đ/ngày</div>
-                        <div style={{ color: C.muted }}>{fmt(hi.price)}đ · {hc.days}ng</div>
+                    <div key={hi.id} style={{ display: "grid", gridTemplateColumns: "1fr 80px 70px 60px", gap: 4, padding: "6px 0", borderTop: `0.5px solid ${C.border}` }}>
+                      <div style={{ fontSize: 12 }}>{hi.name} {hi.brand ? <span style={{ color: C.muted }}>{hi.brand}</span> : null}
+                        {hc.notStarted && <span style={{ fontSize: 10, color: "#6366F1", marginLeft: 4 }}>chưa dùng</span>}
                       </div>
+                      <div style={{ fontSize: 12, textAlign: "right", fontWeight: 500 }}>{hc.perDay ? fmt(hc.perDay) + "đ" : "—"}</div>
+                      <div style={{ fontSize: 12, textAlign: "right", color: C.muted }}>{hc.costPerMl ? hc.costPerMl.toFixed(1) + "đ" : "—"}</div>
+                      <div style={{ fontSize: 12, textAlign: "right", color: C.muted }}>{hc.notStarted ? "—" : hc.days + "ng"}</div>
                     </div>
                   );
                 })}
-                <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 0", borderTop: `2px solid ${C.accent}`, marginTop: 4 }}>
-                  <div style={{ flex: 1, fontSize: 13, fontWeight: 600, color: C.accent }}>{w.name} (wishlist)</div>
-                  <div style={{ fontSize: 12, textAlign: "right" }}>
-                    <div style={{ fontWeight: 600, color: C.accent }}>{c.perDay ? fmt(c.perDay) + "đ/ngày" : "—"}</div>
-                    <div style={{ color: C.muted }}>{fmt(w.price)}đ · {c.estDays || "?"}ng</div>
-                  </div>
+                {/* Wishlist row */}
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 80px 70px 60px", gap: 4, padding: "7px 0 4px", borderTop: `2px solid ${C.accent}`, marginTop: 2 }}>
+                  <div style={{ fontSize: 12, fontWeight: 600, color: C.accent }}>{w.name} <span style={{ fontSize: 10, color: C.accentText }}>wishlist</span></div>
+                  <div style={{ fontSize: 12, textAlign: "right", fontWeight: 700, color: C.accent }}>{c.perDay ? fmt(c.perDay) + "đ" : "—"}</div>
+                  <div style={{ fontSize: 12, textAlign: "right", color: C.accentText, fontWeight: 600 }}>{c.costPerMl ? c.costPerMl.toFixed(1) + "đ" : "—"}</div>
+                  <div style={{ fontSize: 12, textAlign: "right", color: C.muted }}>{c.estDays ? c.estDays + "ng" : "—"}</div>
                 </div>
               </div>
             )}
